@@ -1,0 +1,48 @@
+# Tomogration — things that must NOT be committed
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# The app builds these on the VM at install/first-run — machine-specific, do not ship
+.venv/
+libs/                     # xcb libs fetched per-VM by fetch_xcb_libs.sh
+tomogration.desktop.local # generated launcher with an absolute Exec path
+
+# Per-user runtime state (lives in $HOME, not the repo, but ignore if copied in)
+.tomogration.json         # window config: warp_launch, last_root, saved parameters
+
+# Per-project state written into a DATA folder (never inside the repo, but guard anyway)
+.tomogration_history.json
+exclusion_list.txt
+*.settings
+
+# Cryo-ET data — NEVER commit microscopy data or results to the code repo
+*.eer
+*.mrc
+*.mrcs
+*.st
+*.rec
+*.tomostar
+*.mdoc
+*.gain
+*.tlt
+*.xf
+*.aln
+frames/
+mdocs/
+gains/
+tomostar/
+Thumbnails/
+warp_frameseries/
+warp_tiltseries/
+aretomo_output*/
+
+# OS / editor
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
