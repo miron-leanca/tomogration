@@ -2248,6 +2248,193 @@ NONATIVE_DIR = QFileDialog.Option.DontUseNativeDialog | QFileDialog.Option.ShowD
 
 
 # ===========================================================================
+# JOB MODEL (Phase 1) — a CryoSPARC-style DAG of job INSTANCES.
+#
+# The three-column view treats each STAGE as a singleton whose result lives at
+# one conventional path (STAGE_OUTPUTS). The card view instead models each RUN
+# as a job instance with its OWN processing directory, wired to upstream jobs by
+# named input slots. This is possible because every WarpTools command accepts
+# --input_processing / --output_processing (they live in BaseCommand): a job
+# READS its parent's processing dir and WRITES its own, sharing no mutable state.
+# Verified on the VM 2026-07-10 — a branched `ts_ctf --output_processing
+# warp_tiltseries_b` left the trunk XML byte-identical (md5 OK), kept all upstream
+# alignment metadata (size 430,737 -> 431,020, not a stripped rewrite), and a
+# `ts_reconstruct --input_processing warp_tiltseries_b` read it back and
+# reconstructed. Non-WarpTools wrappers (aretomo, miss_align, relion4_*) take
+# explicit in/out dirs instead, so they get no processing-dir flags here.
+#
+# Store: .tomogration_jobs.json in the project root:
+#     {"seq": <int>, "jobs": {"J1": {..job..}, "J2": {...}}}
+# This whole layer is PURE (stdlib only, no Qt) so it unit-tests off the VM; the
+# GUI wiring (dispatch, the canvas) sits on top of it in the Tomogration class.
+# ===========================================================================
+JOBS_FILE = ".tomogration_jobs.json"
+JOB_STATUSES = ("queued", "running", "completed", "failed")
+
+
+def jobs_path(root):
+    return Path(root) / JOBS_FILE
+
+
+def load_jobs(root):
+    """The job store {'seq': int, 'jobs': {id: job}} — empty scaffold if missing
+    or unreadable (same defensive contract as load_history)."""
+    p = jobs_path(root)
+    if not p.is_file():
+        return {"seq": 0, "jobs": {}}
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {"seq": 0, "jobs": {}}
+    if not isinstance(data, dict) or not isinstance(data.get("jobs"), dict):
+        return {"seq": 0, "jobs": {}}
+    data.setdefault("seq", len(data["jobs"]))
+    return data
+
+
+def save_jobs(root, store):
+    try:
+        jobs_path(root).write_text(json.dumps(store, indent=1))
+    except OSError:
+        pass
+
+
+def job_output_dir(job_id):
+    """A job's processing dir, relative to the project root (cwd of every run)."""
+    return f"jobs/{job_id}"
+
+
+def new_job(root, stage_id, label, params, inputs=None):
+    """Create + persist a fresh job; return the record. `inputs` maps an input
+    slot name -> the parent job id feeding it (or None = read the project trunk /
+    the .settings default). Ids are monotonic 'J<seq>' so they never collide even
+    after deletions."""
+    store = load_jobs(root)
+    store["seq"] = int(store.get("seq", 0)) + 1
+    jid = f"J{store['seq']}"
+    job = {
+        "id": jid,
+        "stage_id": stage_id,
+        "label": label,
+        "params": dict(params or {}),
+        "inputs": dict(inputs or {}),
+        "output_dir": job_output_dir(jid),
+        "command": "",
+        "status": "queued",
+        "exit_code": None,
+        "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "started": None,
+        "finished": None,
+        "summary": {},
+    }
+    store["jobs"][jid] = job
+    save_jobs(root, store)
+    return job
+
+
+def update_job(root, job_id, **fields):
+    """Merge `fields` into a stored job; return it (or None if unknown id)."""
+    store = load_jobs(root)
+    job = store.get("jobs", {}).get(job_id)
+    if job is None:
+        return None
+    job.update(fields)
+    save_jobs(root, store)
+    return job
+
+
+def is_warp_stage(spec):
+    """True for stages whose command is a WarpTools subcommand — the ones that
+    accept --input_processing / --output_processing for free (BaseCommand)."""
+    return str(spec.get("base", "")).startswith("WarpTools")
+
+
+def parent_job_id(job):
+    """The single upstream job whose processing dir this job reads: the
+    'processing' input slot, else the first slot carrying a job id."""
+    inputs = job.get("inputs", {}) or {}
+    if inputs.get("processing"):
+        return inputs["processing"]
+    for v in inputs.values():
+        if v:
+            return v
+    return None
+
+
+def io_flags_for_job(spec, job, store):
+    """Extra tokens wiring a WarpTools job to its own processing dir (and its
+    parent's, if any). Wrapper stages return '' — they resolve in/out dirs by
+    their own means. A parent with no job id (trunk) yields no --input_processing,
+    so the run reads the .settings default, exactly like the three-column view."""
+    if not is_warp_stage(spec):
+        return ""
+    toks = []
+    pid = parent_job_id(job)
+    parent = store.get("jobs", {}).get(pid) if pid else None
+    if parent:
+        toks.append(f"--input_processing {parent['output_dir']}")
+    toks.append(f"--output_processing {job['output_dir']}")
+    return " ".join(toks)
+
+
+def build_job_command(spec, job, store, warp_cmd=None, group_inputs=None):
+    """A job's exact command = the pure stage command (build_command, unchanged)
+    plus this job's processing-dir wiring. Manual --*_processing already typed
+    into the params wins (we don't double it)."""
+    cmd = build_command(spec, job.get("params", {}), warp_cmd, group_inputs)
+    extra = io_flags_for_job(spec, job, store)
+    if extra and "--output_processing" not in cmd and "--input_processing" not in cmd:
+        cmd = f"{cmd} {extra}"
+    return cmd
+
+
+# ---- per-stage result summaries (the one-line card readout) ----------------
+# summarize_job(stage_id, job_abs_dir) -> {label: value}. A card must NEVER
+# enumerate thousands of ceph files on the Qt thread (that crash is why
+# ask_project_root / the History 40-cap exist), so counts are bounded and the
+# specific parsers touch only a small fixed set of fields. All defensive: any
+# error -> {}. Stage-specific parsers (ts_ctf defocus, tomogram counts, pick
+# scores) are registered in STAGE_SUMMARIZERS as the real Warp XML/STAR layout is
+# confirmed against a VM sample; until then every stage uses summarize_generic.
+def _count_glob(dir_path, pattern, cap=5000):
+    """(count, capped) for files matching pattern; stops at cap so a huge ceph
+    dir never blocks the caller."""
+    n = 0
+    try:
+        for _ in Path(dir_path).glob(pattern):
+            n += 1
+            if n >= cap:
+                return n, True
+    except OSError:
+        pass
+    return n, False
+
+
+def summarize_generic(job_dir):
+    """Cheap fallback: how many of each product type the job wrote."""
+    d = Path(job_dir)
+    if not d.is_dir():
+        return {}
+    out = {}
+    for ext, key in ((".mrc", "mrc"), (".star", "star"), (".xml", "xml")):
+        n, capped = _count_glob(d, f"*{ext}")
+        if n:
+            out[key] = f"{n}+" if capped else n
+    return out
+
+
+STAGE_SUMMARIZERS = {}
+
+
+def summarize_job(stage_id, job_dir):
+    fn = STAGE_SUMMARIZERS.get(stage_id, summarize_generic)
+    try:
+        return fn(job_dir) or {}
+    except Exception:
+        return {}
+
+
+# ===========================================================================
 # QProcess wrapper: live stdout/stderr streaming + terminate
 # ===========================================================================
 class ProcessRunner(QObject):

@@ -5,7 +5,12 @@
       "Bash(cd \"/Users/miron-mac/Library/CloudStorage/OneDrive-TheRosalindFranklinInstitute/Documents/Results/Tomography/Scripting/tomogration2\" && echo \"=== ARCHIVE_ON_RERUN ===\" && sed -n '2160,2175p' tomogration_app.py && echo \"=== stages that take output_processing / suffix ===\" && grep -n \"output_processing\\\\|input_processing\\\\|out_suffix\\\\|output_suffix\\\\|in_suffix\\\\|input_directory\" tomogration_app.py | head -20)",
       "mcp__visualize__read_me",
       "mcp__visualize__show_widget",
-      "Bash(echo \"\\(exit $?\\)\")"
+      "Bash(echo \"\\(exit $?\\)\")",
+      "Bash(python3 -m py_compile /Users/miron-mac/Library/CloudStorage/OneDrive-TheRosalindFranklinInstitute/Documents/OC43/scripts/tomogration2/260705_shared-tool_tomogration_app.py)",
+      "Bash(python3 test_jobs.py)",
+      "Bash(python3 tests/test_jobs.py)",
+      "Bash(git add *)",
+      "Bash(git -c commit.gpgsign=false commit -q -m ' *)"
     ]
   }
 }
