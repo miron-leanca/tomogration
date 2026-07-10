@@ -39,7 +39,9 @@ import struct
 import array as _array
 
 from PySide6.QtCore import Qt, QObject, QEvent, Signal, QProcess, QTimer
-from PySide6.QtGui import QBrush, QColor, QImage, QPixmap, QTextCursor, QFont
+from PySide6.QtGui import (
+    QBrush, QColor, QImage, QPixmap, QTextCursor, QFont, QPen, QPainter,
+)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QPlainTextEdit, QScrollArea, QSlider, QCheckBox,
@@ -47,6 +49,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QHeaderView, QGridLayout, QFrame, QStackedWidget, QComboBox,
     QInputDialog, QListWidgetItem, QTextBrowser,
     QAbstractScrollArea, QAbstractSpinBox, QSpinBox,
+    QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsSimpleTextItem,
 )
 
 
@@ -2499,6 +2502,93 @@ def summarize_job(stage_id, job_dir):
 
 
 # ===========================================================================
+# Card-canvas layout (Phase 2) — PURE (no Qt), so it's unit-testable. Maps the
+# job store + STAGES onto positioned nodes + edges the QGraphicsView draws.
+# ===========================================================================
+CARD_W, CARD_H = 184, 66          # card box size (scene units)
+GAP_X, GAP_Y = 44, 34             # spacing between forks (x) and stages (y)
+
+
+def summary_text(summary):
+    """One-line human readout for a job card, from its summary dict. Known keys
+    get friendly units; anything else falls back to 'value key' pairs."""
+    if not summary:
+        return ""
+    parts = []
+    if "series" in summary:
+        parts.append(f"{summary['series']} series")
+    if "defocus_um" in summary:
+        parts.append(f"{summary['defocus_um']} µm")
+    if "tomograms" in summary:
+        parts.append(f"{summary['tomograms']} tomo")
+    if "angpix" in summary:
+        parts.append(f"{summary['angpix']} Å")
+    if not parts:
+        parts = [f"{v} {k}" for k, v in list(summary.items())[:2]]
+    return " · ".join(parts)
+
+
+def canvas_layout(store):
+    """Positioned workflow graph for the canvas. Returns (nodes, edges).
+
+    One ROW per stage, in canonical STAGES order. A stage with no jobs shows a
+    single greyed GHOST node ('the default workflow, not yet run'); a stage with
+    jobs shows one real node per job, spread across COLUMNS so forks sit side by
+    side. Edges: real jobs link to their parent job (the true DAG); stages with
+    no real parent are chained along the ghost trunk so the default pipeline
+    reads as a connected flow."""
+    jobs = store.get("jobs", {}) if isinstance(store, dict) else {}
+    by_stage = {}
+    for jid, job in jobs.items():
+        by_stage.setdefault(job.get("stage_id"), []).append((jid, job))
+    for lst in by_stage.values():
+        lst.sort(key=lambda t: t[0])
+
+    nodes, index, row_first = [], {}, {}
+    for row, spec in enumerate(STAGES):
+        sid = spec["id"]
+        y = row * (CARD_H + GAP_Y)
+        js = by_stage.get(sid, [])
+        if not js:
+            nid = f"ghost:{sid}"
+            n = {"id": nid, "stage_id": sid, "label": spec.get("label", sid),
+                 "group": spec.get("group", ""), "row": row, "col": 0,
+                 "x": 0, "y": y, "w": CARD_W, "h": CARD_H,
+                 "is_ghost": True, "status": "ghost", "summary": {}}
+            nodes.append(n)
+            index[nid] = n
+            row_first[sid] = nid
+        else:
+            for col, (jid, job) in enumerate(js):
+                n = {"id": jid, "stage_id": sid,
+                     "label": job.get("label", spec.get("label", sid)),
+                     "group": spec.get("group", ""), "row": row, "col": col,
+                     "x": col * (CARD_W + GAP_X), "y": y,
+                     "w": CARD_W, "h": CARD_H, "is_ghost": False,
+                     "status": job.get("status", "queued"),
+                     "summary": job.get("summary", {}) or {}}
+                nodes.append(n)
+                index[jid] = n
+            row_first[sid] = js[0][0]
+
+    edges, has_real_parent = [], set()
+    for jid, job in jobs.items():
+        parent = next((pid for pid in (job.get("inputs") or {}).values()
+                       if pid and pid in index), None)
+        if parent:
+            edges.append((parent, jid))
+            has_real_parent.add(job.get("stage_id"))
+    order = [s["id"] for s in STAGES]
+    for a, b in zip(order, order[1:]):
+        if b in has_real_parent:          # already linked via a real parent edge
+            continue
+        src, dst = row_first.get(a), row_first.get(b)
+        if src and dst:
+            edges.append((src, dst))
+    return nodes, edges
+
+
+# ===========================================================================
 # QProcess wrapper: live stdout/stderr streaming + terminate
 # ===========================================================================
 class ProcessRunner(QObject):
@@ -3478,6 +3568,119 @@ class ProcessingHistory(QDialog):
 
 
 # ===========================================================================
+# Card canvas (Phase 2) — a QGraphicsView rendering canvas_layout(). Read-only:
+# real job cards + greyed ghost cards for the default (un-run) pipeline. Clicking
+# a card selects its stage in the shared form (like clicking a stage row). Run /
+# fork controls are Phase 3.
+# ===========================================================================
+# (fill, border) per status. Ghost = dim + dashed; others tint by outcome.
+_CARD_STYLE = {
+    "ghost":     ("#242424", "#555555"),
+    "queued":    ("#26313a", "#3a6ea5"),
+    "running":   ("#3a3320", "#e0a850"),
+    "completed": ("#1d3326", "#27ae60"),
+    "failed":    ("#3a2320", "#c0392b"),
+}
+
+
+class _CardItem(QGraphicsRectItem):
+    """A single card. Holds its node dict and routes clicks to the canvas."""
+    def __init__(self, node, canvas):
+        super().__init__(0, 0, node["w"], node["h"])
+        self._node = node
+        self._canvas = canvas
+        self.setPos(node["x"], node["y"])
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, ev):
+        self._canvas._pick(self._node)
+        super().mousePressEvent(ev)
+
+
+class JobCanvas(QWidget):
+    def __init__(self, root_getter, on_pick, parent=None):
+        super().__init__(parent)
+        self._root_getter = root_getter      # callable -> project_root str
+        self._on_pick = on_pick              # callable(stage_id)
+        self.scene = QGraphicsScene(self)
+        self.view = QGraphicsView(self.scene)
+        self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.view.setBackgroundBrush(QColor("#0e0e0e"))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.view)
+
+    def refresh(self):
+        self.scene.clear()
+        try:
+            store = load_jobs(self._root_getter())
+        except Exception:
+            store = {"jobs": {}}
+        nodes, edges = canvas_layout(store)
+        index = {n["id"]: n for n in nodes}
+
+        edge_pen = QPen(QColor("#4a4a4a"))
+        edge_pen.setWidth(2)
+        for src, dst in edges:
+            a, b = index.get(src), index.get(dst)
+            if not a or not b:
+                continue
+            self.scene.addLine(a["x"] + a["w"] / 2, a["y"] + a["h"],
+                               b["x"] + b["w"] / 2, b["y"], edge_pen)
+
+        for n in nodes:
+            self._add_card(n)
+
+        rect = self.scene.itemsBoundingRect()
+        self.scene.setSceneRect(rect.adjusted(-40, -40, 40, 40))
+
+    def _add_card(self, n):
+        fill, border = _CARD_STYLE.get(n["status"], _CARD_STYLE["ghost"])
+        item = _CardItem(n, self)
+        item.setBrush(QBrush(QColor(fill)))
+        pen = QPen(QColor(border))
+        pen.setWidth(2)
+        if n["is_ghost"]:
+            pen.setStyle(Qt.PenStyle.DashLine)
+        item.setPen(pen)
+        self.scene.addItem(item)
+
+        title = QGraphicsSimpleTextItem(n["label"], item)
+        title.setBrush(QColor("#8a8a8a" if n["is_ghost"] else "#ececec"))
+        tf = QFont()
+        tf.setPointSize(11)
+        tf.setBold(True)
+        title.setFont(tf)
+        title.setPos(11, 9)
+
+        if n["is_ghost"]:
+            sub = "not built"
+        else:
+            st = summary_text(n["summary"])
+            sub = n["status"] + (f" · {st}" if st else "")
+        subitem = QGraphicsSimpleTextItem(sub, item)
+        subitem.setBrush(QColor("#7d7d7d"))
+        sf = QFont()
+        sf.setPointSize(9)
+        subitem.setFont(sf)
+        subitem.setPos(11, 36)
+
+        if not n["is_ghost"]:
+            badge = QGraphicsSimpleTextItem(n["id"], item)
+            badge.setBrush(QColor("#9ec5ff"))
+            bf = QFont()
+            bf.setPointSize(8)
+            badge.setFont(bf)
+            badge.setPos(n["w"] - 42, 9)
+
+    def _pick(self, node):
+        try:
+            self._on_pick(node["stage_id"])
+        except Exception:
+            pass
+
+
+# ===========================================================================
 # Main window
 # ===========================================================================
 class Tomogration(QMainWindow):
@@ -3563,9 +3766,20 @@ class Tomogration(QMainWindow):
                                    self._build_docs_panel()))
         work = QSplitter(Qt.Horizontal)
         work.setHandleWidth(8)
-        work.addWidget(self._panel("listsCard", "Pipeline jobs", self._build_job_lists()))
+        # The stage picker is a QStackedWidget: page 0 = the classic 3-column
+        # stage lists, page 1 = the card canvas. Both drive the SAME form/command
+        # panel beside them (selecting a card == clicking a stage row), so the
+        # toggle only changes HOW you pick a node, nothing downstream.
+        self.job_stack = QStackedWidget()
+        self.job_stack.addWidget(
+            self._panel("listsCard", "Pipeline jobs", self._build_job_lists()))
+        self.canvas = JobCanvas(lambda: self.project_root, self._canvas_pick)
+        self.job_stack.addWidget(
+            self._panel("canvasCard", "Workflow graph", self.canvas))
+        work.addWidget(self.job_stack)
         work.addWidget(self._build_align_and_command())     # builds its own cards
         work.setSizes([330, 470])
+        self._work_split = work
         left.addWidget(work)
         left.setSizes([320, 580])
 
@@ -3597,6 +3811,8 @@ class Tomogration(QMainWindow):
         self._refresh_status_dots()
         self._select_stage(self._stage_by_id("ts_reconstruct") or STAGES[0])
         self._save_config({**self._load_config(), "last_root": self.project_root})
+        if self._load_config().get("view_mode") == "canvas":
+            self._set_view_mode("canvas")
 
     # ---- menu bar (affordances live here to keep the center panel narrow) ----
     def _build_menus(self):
@@ -3616,8 +3832,39 @@ class Tomogration(QMainWindow):
         tools.addSeparator()
         tools.addAction("Set WarpTools launch command…", self._set_warp_launch)
         view = mb.addMenu("View")
+        self._act_canvas = view.addAction("Card (graph) view", self._toggle_view)
+        self._act_canvas.setCheckable(True)
+        view.addSeparator()
         view.addAction("Refresh status", self._refresh_status_dots)
         view.addAction("Tilt-series groups…", self._open_groups)
+
+    # ---- card canvas (Phase 2) ----
+    def _canvas_pick(self, stage_id):
+        """Clicking a card selects its stage in the shared form (read-only)."""
+        spec = self._stage_by_id(stage_id)
+        if spec:
+            self._select_stage(spec)
+
+    def _refresh_canvas(self):
+        """Rebuild the canvas from the job store. Safe to call before the canvas
+        exists (early in construction) and is the hook _finalize_job calls."""
+        if getattr(self, "canvas", None) is not None:
+            self.canvas.refresh()
+
+    def _toggle_view(self):
+        going_to_canvas = self.job_stack.currentIndex() == 0
+        self._set_view_mode("canvas" if going_to_canvas else "lists")
+
+    def _set_view_mode(self, mode):
+        canvas = (mode == "canvas")
+        self.job_stack.setCurrentIndex(1 if canvas else 0)
+        if hasattr(self, "_act_canvas"):
+            self._act_canvas.setChecked(canvas)
+        if hasattr(self, "_work_split"):
+            self._work_split.setSizes([560, 420] if canvas else [330, 470])
+        if canvas:
+            self._refresh_canvas()
+        self._save_config({**self._load_config(), "view_mode": mode})
 
     # ---- helpers ----
     @staticmethod

@@ -149,5 +149,24 @@ with tempfile.TemporaryDirectory() as tmp:
         print("   stage-path error:", type(e).__name__, e)
     check("stage-run _on_finished still works (no job side effects)", stage_path_ok)
 
+    # ---- JobCanvas construction + refresh (Phase 2) ------------------------
+    # The full window won't build off-Qt, but the canvas widget alone should
+    # construct and render (stub Qt = no-ops) without throwing, for both an
+    # empty store and one with jobs, and route a card click to the callback.
+    picked = []
+    try:
+        canvas = app.JobCanvas(lambda: str(root), lambda sid: picked.append(sid))
+        canvas.refresh()                     # empty-ish store (has jobs from above)
+        app.new_job(root, "aretomo", "AreTomo", {})
+        canvas.refresh()                     # with an extra job
+        canvas._pick({"stage_id": "ts_ctf"})
+        canvas_ok = True
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        canvas_ok = False
+    check("JobCanvas constructs + refreshes without throwing", canvas_ok)
+    check("card click routes stage_id to callback", picked == ["ts_ctf"])
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

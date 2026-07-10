@@ -163,5 +163,49 @@ with tempfile.TemporaryDirectory() as tmp:
     check("reconstruct empty when no reconstruction/ dir",
           app.summarize_job("ts_reconstruct", cd) == {})
 
+# ---- canvas layout (Phase 2, pure) ----------------------------------------
+with tempfile.TemporaryDirectory() as tmp:
+    croot = Path(tmp)
+    n_stages = len(app.STAGES)
+
+    # empty store -> one ghost per stage, chained along the trunk
+    nodes, edges = app.canvas_layout(app.load_jobs(croot))
+    check("empty: one node per stage", len(nodes) == n_stages)
+    check("empty: all ghost", all(n["is_ghost"] for n in nodes))
+    check("empty: trunk chained", len(edges) == n_stages - 1)
+    check("empty: rows increase by stage order",
+          [n["row"] for n in nodes] == list(range(n_stages)))
+
+    # a CTF job + a reconstruct job wired to it -> two real nodes + a DAG edge
+    ctf = app.new_job(croot, "ts_ctf", "CTF", {"window": "512"})
+    app.update_job(croot, ctf["id"], status="completed",
+                   summary={"series": 15, "defocus_um": "5.25 ± 0.41"})
+    rec = app.new_job(croot, "ts_reconstruct", "Reconstruct", {"angpix": "10"},
+                      inputs={"processing": ctf["id"]})
+    nodes, edges = app.canvas_layout(app.load_jobs(croot))
+    idx = {n["id"]: n for n in nodes}
+    check("real ctf node present + not ghost",
+          ctf["id"] in idx and not idx[ctf["id"]]["is_ghost"])
+    check("real ctf carries status", idx[ctf["id"]]["status"] == "completed")
+    check("real ctf carries summary", idx[ctf["id"]]["summary"].get("series") == 15)
+    check("DAG edge parent->child present", (ctf["id"], rec["id"]) in edges)
+    check("still one ghost for an un-run stage", f"ghost:aretomo" in idx)
+
+    # a second CTF job (fork) -> two nodes on the ts_ctf row, side by side
+    ctf2 = app.new_job(croot, "ts_ctf", "CTF wide", {"window": "1024"})
+    nodes, _ = app.canvas_layout(app.load_jobs(croot))
+    ctf_row = [n for n in nodes if n["stage_id"] == "ts_ctf"]
+    check("fork: two nodes on ts_ctf row", len(ctf_row) == 2)
+    check("fork: distinct columns (side by side)",
+          {n["col"] for n in ctf_row} == {0, 1}
+          and ctf_row[0]["x"] != ctf_row[1]["x"])
+
+    # summary_text formatting
+    check("summary_text ctf", app.summary_text({"series": 15, "defocus_um": "5.25 ± 0.41"})
+          == "15 series · 5.25 ± 0.41 µm")
+    check("summary_text reconstruct",
+          app.summary_text({"tomograms": 290, "angpix": "10.00"}) == "290 tomo · 10.00 Å")
+    check("summary_text empty -> ''", app.summary_text({}) == "")
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
