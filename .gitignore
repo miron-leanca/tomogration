@@ -1,0 +1,29 @@
+# Runtime / per-user state
+.tomogration.json
+.tomogration_groups.json
+.tomogration_history.json
+.tomogration_jobs.json
+
+# Local install artefacts (built by install.sh / fetch_xcb_libs.sh on each VM)
+.venv/
+libs/
+
+# Data — never track EM data in the repo
+data/
+frames/
+mdocs/
+gains/
+Thumbnails/
+tomostar/
+warp_frameseries/
+warp_tiltseries*/
+aretomo_output*/
+relion4/
+jobs/
+groups/
+selected*/
+
+# OS / editor cruft
+.DS_Store
+__pycache__/
+*.pyc

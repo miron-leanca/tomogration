@@ -1,0 +1,717 @@
+{
+ "_meta": {
+  "purpose": "Left-panel documentation for tomogration, keyed by STAGES[].id. Wire each stage's docs from here (replace the inline 'docs' dicts in tomogration_app.py, or load this JSON at startup).",
+  "render_hint": "Per stage show: title, what, why, a parameter table (name / flag / default / range / effect), then pitfalls (red), qc (what good output looks like), and refs as clickable links.",
+  "dataset_context": "EER, 1.57 A/px unbinned, ~3.5 e/A2 per tilt, FIB lamella, V100 GPUs. Defaults below are official-guide values adapted for this pixel size/dose; treat as starting points.",
+  "sources": [
+   "https://warpem.github.io/warp/user_guide/warptools/quick_start_warptools_tilt_series/",
+   "https://warpem.github.io/warp/reference/warptools/api/frame_series/",
+   "https://github.com/warpem/warp/blob/main/scripts/EMPIAR-10491_5TS_e2e.sh",
+   "https://tomoguide.github.io/",
+   "https://cryoem101.org/cryoet-chapter-5/",
+   "https://gensoft.pasteur.fr/docs/AreTomo3/2.0.6/AreTomo3_Manual_2.0.6_01jan25.pdf"
+  ]
+ },
+ "create_settings_fs": {
+  "title": "create_settings (frame series)",
+  "what": "Creates warp_frameseries.settings, the file every later frame-series command reads. Defines raw pixel size, gain reference, dose and EER frame grouping for the whole project.",
+  "why": "All downstream geometry and dose-weighting derive from these values. Set once, correctly, or every later step is subtly wrong.",
+  "params": [
+   {
+    "name": "angpix",
+    "flag": "--angpix",
+    "default": "1.57",
+    "range": "instrument-fixed",
+    "effect": "Raw UNBINNED pixel size. Must match the detector, not any binned value."
+   },
+   {
+    "name": "gain_path",
+    "flag": "--gain_path",
+    "default": "gain.mrc",
+    "range": "path",
+    "effect": "Gain reference. Pair with --gain_flip_y / --gain_flip_x / --gain_transpose to match detector orientation."
+   },
+   {
+    "name": "exposure",
+    "flag": "--exposure",
+    "default": "3.5",
+    "range": "dataset",
+    "effect": "Dose in e/A2 per tilt (or per frame depending on convention) used for dose-weighting."
+   },
+   {
+    "name": "eer_ngroups",
+    "flag": "--eer_ngroups",
+    "default": "auto",
+    "range": "8-40",
+    "effect": "How EER frames are grouped into fractions. Too few = poor motion fit; too many = noisy fractions. Match to dose/frame."
+   },
+   {
+    "name": "extension",
+    "flag": "--extension",
+    "default": "*.eer",
+    "range": "glob",
+    "effect": "Raw file pattern."
+   }
+  ],
+  "pitfalls": "Pixel size is the raw unbinned value. Wrong gain flip => streaky averages. EER grouping is easy to forget and hard to spot later.",
+  "qc": "Averages in warp_frameseries/average should look clean and un-streaked; CTF Thon rings visible in previews.",
+  "refs": [
+   "https://warpem.github.io/warp/reference/warp/interface/interface_overview/",
+   "https://github.com/warpem/warp/blob/main/scripts/EMPIAR-10491_5TS_e2e.sh"
+  ]
+ },
+ "fs_motion_and_ctf": {
+  "title": "fs_motion_and_ctf",
+  "what": "Per-frame-series motion correction plus CTF estimation. Produces motion-corrected averages (and odd/even half-sets) and per-micrograph CTF.",
+  "why": "Motion-corrected averages are the input to tilt-series alignment; the CTF estimate feeds dose-weighting and later 3D-CTF handling. Half-sets enable Noise2Noise denoising.",
+  "params": [
+   {
+    "name": "m_grid",
+    "flag": "--m_grid",
+    "default": "1x1x3",
+    "range": "X x Y x T",
+    "effect": "Motion model resolution. First two = spatial (local motion), third = temporal (~ frame/fraction count). Higher temporal costs lots of memory for little gain."
+   },
+   {
+    "name": "c_grid",
+    "flag": "--c_grid",
+    "default": "2x2x1",
+    "range": "2x2x1 to 5x5x1",
+    "effect": "CTF/defocus model resolution. 5x5 suits 4K at 1.0-1.3 A/px; at 1.57 A/px, 2x2-3x3 is usually enough. Temporal >1 rarely helps."
+   },
+   {
+    "name": "m_range_min",
+    "flag": "--m_range_min",
+    "default": "500",
+    "range": "Angstrom",
+    "effect": "Low-res bound of the motion fit."
+   },
+   {
+    "name": "m_range_max",
+    "flag": "--m_range_max",
+    "default": "10",
+    "range": "Angstrom",
+    "effect": "High-res bound of the motion fit."
+   },
+   {
+    "name": "m_bfac",
+    "flag": "--m_bfac",
+    "default": "-500",
+    "range": "-1000 to 0",
+    "effect": "B-factor downweighting high frequencies. More negative = stronger low-pass, more robust on low-SNR data."
+   },
+   {
+    "name": "c_range_max",
+    "flag": "--c_range_max",
+    "default": "7",
+    "range": "Angstrom",
+    "effect": "High-res bound for CTF fit. Lower prevents overfitting a high-res defocus model."
+   },
+   {
+    "name": "c_defocus_max",
+    "flag": "--c_defocus_max",
+    "default": "8",
+    "range": "um",
+    "effect": "Upper defocus bound of the exhaustive search. Match acquisition range plus margin."
+   },
+   {
+    "name": "c_use_sum",
+    "flag": "--c_use_sum",
+    "default": "on",
+    "range": "flag",
+    "effect": "Fit CTF from the motion-corrected average rather than per-frame spectra. Helps when per-frame signal is low or there is no energy filter."
+   },
+   {
+    "name": "out_averages",
+    "flag": "--out_averages",
+    "default": "on",
+    "range": "flag",
+    "effect": "Write aligned averages (needed for alignment)."
+   },
+   {
+    "name": "out_average_halves",
+    "flag": "--out_average_halves",
+    "default": "on",
+    "range": "flag",
+    "effect": "Write odd/even half-averages (needed for Noise2Noise denoising of images/tomograms)."
+   }
+  ],
+  "pitfalls": "Auto-recovery quarantines a bad .eer to frames/bad/, removes its mdoc ZValue block, logs it, and retries. Only fs_* auto-recovers; ts_* crashes are GPU/resource, not bad files. cuFFT crashes here usually mean one corrupt frame, not a parameter problem.",
+  "qc": "Use ts_filter_quality / filter_quality to print CTF-resolution and motion histograms. Outliers in CTF resolution flag bad tilts.",
+  "refs": [
+   "https://warpem.github.io/warp/user_guide/warptools/quick_start_warptools_tilt_series/",
+   "https://warpem.github.io/warp/reference/warptools/api/frame_series/"
+  ]
+ },
+ "ts_import": {
+  "title": "ts_import",
+  "what": "Tells WarpTools which movies belong to which tilt series, using the mdocs, and writes .tomostar files (one per series) carrying tilt angles and cumulative dose.",
+  "why": "Establishes per-tilt dose bookkeeping and geometric handedness before any alignment.",
+  "params": [
+   {
+    "name": "tilt_exposure",
+    "flag": "--tilt_exposure",
+    "default": "3.5",
+    "range": "dataset",
+    "effect": "Per-tilt dose (e/A2) for cumulative-dose tracking."
+   },
+   {
+    "name": "min_intensity",
+    "flag": "--min_intensity",
+    "default": "0.3",
+    "range": "0-1",
+    "effect": "Drops tilts darker than min_intensity * cos(tilt) * 0-tilt intensity. Removes blocked/grid-bar tilts."
+   },
+   {
+    "name": "dont_invert",
+    "flag": "--dont_invert",
+    "default": "dataset-specific",
+    "range": "flag",
+    "effect": "Inverts geometric handedness by flipping through XY. Whether you need it depends on the scope/camera path; verify with ts_defocus_hand."
+   }
+  ],
+  "pitfalls": "If an .eer was quarantined but its mdoc ZValue block was NOT removed, ts_import fails with 'failed to parse specific tilts'. Use Repair mdocs to fix stale entries.",
+  "qc": "One .tomostar per series in tomostar/; tilt counts match expectation after exclusions.",
+  "refs": [
+   "https://warpem.github.io/warp/user_guide/warptools/quick_start_warptools_tilt_series/"
+  ]
+ },
+ "ts_stack": {
+  "title": "ts_stack",
+  "what": "Generates aligned tilt-series stacks (.mrc) plus IMOD-format .rawtlt files at a chosen pixel size, ready for an external aligner.",
+  "why": "Alignment programs (AreTomo2, IMOD/Etomo) operate on these stacks. Masked regions are filled with statistics-matched Gaussian noise to aid alignment.",
+  "params": [
+   {
+    "name": "angpix",
+    "flag": "--angpix",
+    "default": "10",
+    "range": "8-12",
+    "effect": "Working pixel size for alignment. Coarser = faster and more robust for fiducial-less alignment; you re-reconstruct finer later."
+   }
+  ],
+  "pitfalls": "Run ts_import first. The angpix here defines the space your .xf alignments live in; ts_import_alignments must use the same value.",
+  "qc": "Stacks in tiltstack/<TS>/ open cleanly in 3dmod; tilt order monotonic.",
+  "refs": [
+   "https://warpem.github.io/warp/reference/warptools/custom_tilt_series_alignments/"
+  ]
+ },
+ "aretomo": {
+  "title": "AreTomo2 (ts_aretomo)",
+  "what": "GPU, marker-free tilt-series alignment (and optional reconstruction). Solves tilt-axis, shifts and local motion, then exports IMOD-style .xf transforms for Warp to import.",
+  "why": "Lamella data has no fiducials; AreTomo2 aligns without them. Alignment quality caps every downstream resolution.",
+  "params": [
+   {
+    "name": "angpix",
+    "flag": "--angpix",
+    "default": "10",
+    "range": "8-12",
+    "effect": "Alignment pixel size; match ts_stack."
+   },
+   {
+    "name": "alignz",
+    "flag": "--alignz / -AlignZ",
+    "default": "~lamella thickness (px)",
+    "range": "600-1400 px",
+    "effect": "Z-height searched during alignment. Set near the true sample thickness in pixels. For FIB lamellae, use the known lamella thickness."
+   },
+   {
+    "name": "tilt_axis",
+    "flag": "-TiltAxis",
+    "default": "auto",
+    "range": "deg",
+    "effect": "Initial tilt-axis angle. Provide if auto-search drifts; AreTomo can iterate it."
+   },
+   {
+    "name": "axis_iter",
+    "flag": "--axis_iter",
+    "default": "5",
+    "range": "0-10",
+    "effect": "Iterations refining the tilt axis."
+   },
+   {
+    "name": "patch",
+    "flag": "-Patch",
+    "default": "0 0",
+    "range": "0 0 to 5 5",
+    "effect": "Local patch alignment grid. More patches model local deformation but need signal; 0 0 = global only."
+   },
+   {
+    "name": "dark_tol",
+    "flag": "-DarkTol",
+    "default": "dataset",
+    "range": "0.1-0.7",
+    "effect": "Threshold for discarding dark tilts."
+   },
+   {
+    "name": "out_imod",
+    "flag": "-OutImod",
+    "default": "1",
+    "range": "flag",
+    "effect": "Write IMOD-format output so Warp can import .xf alignments."
+   }
+  ],
+  "pitfalls": "Wrong AlignZ is the most common cause of poor lamella alignment. Keep versioned output folders + a PARAMETERS.txt audit per run so you can compare. Smaller tilt increments tend to align better and improve tomogram SNR despite weaker per-tilt signal.",
+  "qc": "Check the alignment residual/score AreTomo reports; reconstruct a quick binned tomogram and look for 'ghosting'/drift in 3dmod (a sign of bad alignment).",
+  "refs": [
+   "https://warpem.github.io/warp/reference/warptools/advanced_data_flow/",
+   "https://gensoft.pasteur.fr/docs/AreTomo3/2.0.6/AreTomo3_Manual_2.0.6_01jan25.pdf",
+   "https://cryoem101.org/cryoet-chapter-5/"
+  ]
+ },
+ "ts_import_alignments": {
+  "title": "ts_import_alignments",
+  "what": "Imports the external aligner's .xf transforms back into the WarpTools project.",
+  "why": "Lets Warp reconstruct and export particles using alignments solved by AreTomo2/IMOD.",
+  "params": [
+   {
+    "name": "alignment_angpix",
+    "flag": "--alignment_angpix",
+    "default": "10",
+    "range": "match ts_stack",
+    "effect": "Pixel size the alignments were computed at. MUST equal the ts_stack/AreTomo angpix or geometry is scaled wrong."
+   }
+  ],
+  "pitfalls": "Mismatched alignment_angpix silently corrupts geometry. Use 'Sync selection with alignments' to deselect series lacking a matching .xf before reconstruct.",
+  "qc": "Every selected .tomostar has a corresponding imported alignment.",
+  "refs": [
+   "https://warpem.github.io/warp/reference/warptools/custom_tilt_series_alignments/"
+  ]
+ },
+ "ts_defocus_hand": {
+  "title": "ts_defocus_hand",
+  "what": "Checks (and optionally sets) the defocus handedness of the tilt series.",
+  "why": "Wrong defocus handedness ruins 3D-CTF correction and caps resolution. Run --check before final CTF; --set_flip if it reports inverted.",
+  "params": [
+   {
+    "name": "check",
+    "flag": "--check",
+    "default": "on",
+    "range": "flag",
+    "effect": "Reports a correlation score; negative score => handedness is flipped."
+   },
+   {
+    "name": "set_flip",
+    "flag": "--set_flip",
+    "default": "as needed",
+    "range": "flag",
+    "effect": "Applies the flip when the check reports inverted."
+   }
+  ],
+  "pitfalls": "ts_ctf --auto_hand N can auto-detect/flip during CTF; reports of a stale 'still inverted' message after flipping are a known cosmetic quirk. Decide handedness once, then keep it fixed.",
+  "qc": "Positive correlation score after setting.",
+  "refs": [
+   "https://github.com/warpem/warp/issues/145"
+  ]
+ },
+ "ts_ctf": {
+  "title": "ts_ctf",
+  "what": "Per-tilt CTF estimation that enforces constraints common to the whole series (one defocus per image, consistent across tilts).",
+  "why": "Accurate per-tilt defocus is required for 3D-CTF-correct reconstruction and high-resolution averaging.",
+  "params": [
+   {
+    "name": "window",
+    "flag": "--window",
+    "default": "512",
+    "range": "384-768 px",
+    "effect": "Power-spectrum patch size. Small window = more local defocus, less spectral detail."
+   },
+   {
+    "name": "range_low",
+    "flag": "--range_low",
+    "default": "30",
+    "range": "Angstrom",
+    "effect": "Ignore lowest spatial frequencies in the fit."
+   },
+   {
+    "name": "range_high",
+    "flag": "--range_high",
+    "default": "7",
+    "range": "Angstrom",
+    "effect": "High-res bound of the fit."
+   },
+   {
+    "name": "defocus_min",
+    "flag": "--defocus_min",
+    "default": "0.5",
+    "range": "um",
+    "effect": "Lower bound of defocus search."
+   },
+   {
+    "name": "defocus_max",
+    "flag": "--defocus_max",
+    "default": "8",
+    "range": "um",
+    "effect": "Upper bound; match acquisition range plus margin."
+   },
+   {
+    "name": "voltage",
+    "flag": "--voltage",
+    "default": "300",
+    "range": "kV",
+    "effect": "Microscope-fixed."
+   },
+   {
+    "name": "cs",
+    "flag": "--cs",
+    "default": "2.7",
+    "range": "mm",
+    "effect": "Spherical aberration; microscope-fixed."
+   },
+   {
+    "name": "amplitude",
+    "flag": "--amplitude",
+    "default": "0.07",
+    "range": "0.07-0.10 cryo",
+    "effect": "Amplitude-contrast fraction."
+   },
+   {
+    "name": "auto_hand",
+    "flag": "--auto_hand",
+    "default": "0",
+    "range": "= N tilt series",
+    "effect": "If set to the number of series, auto-checks/corrects defocus handedness during CTF."
+   }
+  ],
+  "pitfalls": "Run ts_defocus_hand first (or use --auto_hand). Overfitting a high-res model with too-high range_high is a common error.",
+  "qc": "ts_filter_quality histogram of CTF-resolution; flag series with poor fits and deselect.",
+  "refs": [
+   "https://warpem.github.io/warp/user_guide/warptools/quick_start_warptools_tilt_series/",
+   "https://github.com/warpem/warp/blob/main/scripts/EMPIAR-10491_5TS_e2e.sh"
+  ]
+ },
+ "ts_reconstruct": {
+  "title": "ts_reconstruct",
+  "what": "Back-projects aligned, CTF-corrected tilts into 3D tomograms, written to warp_tiltseries/reconstruction with preview slices.",
+  "why": "Tomograms are what you pick particles in and visually QC alignment. Reconstruct at a coarse pixel size for picking/inspection.",
+  "params": [
+   {
+    "name": "angpix",
+    "flag": "--angpix",
+    "default": "10",
+    "range": "8-12 for picking",
+    "effect": "Tomogram pixel size. Finer = bigger/slower volumes; coarse is fine for template matching and inspection."
+   },
+   {
+    "name": "perdevice",
+    "flag": "--perdevice",
+    "default": "1",
+    "range": "1-2 (V100) / up to 4-8 (A100)",
+    "effect": "Worker processes per GPU. KEEP AT 1 when --deconv is on (V100)."
+   },
+   {
+    "name": "dont_invert",
+    "flag": "--dont_invert",
+    "default": "dataset-specific",
+    "range": "flag",
+    "effect": "Skip contrast inversion; choose so particles are dark-on-light consistently."
+   },
+   {
+    "name": "deconv",
+    "flag": "--deconv",
+    "default": "off",
+    "range": "flag",
+    "effect": "Deconvolution filter for VISUAL contrast/inspection only. Do not use for the volumes you average from."
+   }
+  ],
+  "pitfalls": "--perdevice 2 with --deconv crashes on V100 (SIGABRT, cuFFT collision). Warp writes mode-12 float16 MRC; IMOD/Dynamo may choke ('Unknown file mrc_file_type 12'). Prepend WARP_FORCE_MRC_FLOAT32=1 to get float32. Set tomogram XY dimensions with the tilt axis along Y.",
+  "qc": "Open in 3dmod: sharp, non-ghosting features = good alignment. SART/SIRT look higher-contrast for viewing; WBP preserves high-frequency info better for STA.",
+  "refs": [
+   "https://groups.google.com/g/warp-em/c/YKUApbpohMg",
+   "https://warpem.github.io/warp/user_guide/warptools/quick_start_warptools_tilt_series/",
+   "https://cryoem101.org/cryoet-chapter-5/"
+  ]
+ },
+ "ts_template_match": {
+  "title": "ts_template_match",
+  "what": "CTF-aware template matching to locate particles in tomograms, scoring each position against a rotated 3D reference.",
+  "why": "Automated picking. Output is a per-tomogram score volume + peaks you then threshold into a particle star file.",
+  "params": [
+   {
+    "name": "tomo_angpix",
+    "flag": "--tomo_angpix",
+    "default": "10",
+    "range": "8-12",
+    "effect": "Matching pixel size. Finer = more sensitive but much slower."
+   },
+   {
+    "name": "subdivisions",
+    "flag": "--subdivisions",
+    "default": "3",
+    "range": "2-4",
+    "effect": "Angular search step: 2 = 15 deg, 3 = 7.5 deg, 4 = 3.75 deg. Finer = slower, better for low-symmetry targets."
+   },
+   {
+    "name": "template_emdb",
+    "flag": "--template_emdb",
+    "default": "(or --template path)",
+    "range": "EMDB id",
+    "effect": "Reference map. Use --template for a local .mrc."
+   },
+   {
+    "name": "template_diameter",
+    "flag": "--template_diameter",
+    "default": "(Angstrom)",
+    "range": "particle size",
+    "effect": "Particle diameter; sets the mask and peak spacing."
+   },
+   {
+    "name": "symmetry",
+    "flag": "--symmetry",
+    "default": "C1",
+    "range": "point group",
+    "effect": "Reduces angular search; set the true symmetry (e.g. O for apoferritin)."
+   },
+   {
+    "name": "whiten",
+    "flag": "--whiten",
+    "default": "on",
+    "range": "flag",
+    "effect": "Spectral whitening boosts high-frequency contribution; helps when alignments are good."
+   },
+   {
+    "name": "check_hand",
+    "flag": "--check_hand",
+    "default": "2",
+    "range": "0/2",
+    "effect": "Verifies geometric handedness by scoring template vs flipped template on N tomograms."
+   }
+  ],
+  "pitfalls": "Use --perdevice 1 for matching. Garbage in, garbage out: a bad-handedness or misaligned tomogram gives meaningless scores.",
+  "qc": "Overlay peaks on the tomogram in a viewer; peaks should sit on real densities, not ice/edges.",
+  "refs": [
+   "https://warpem.github.io/warp/user_guide/warptools/quick_start_warptools_tilt_series/",
+   "https://hpc.nih.gov/apps/warp.html"
+  ]
+ },
+ "threshold_picks": {
+  "title": "threshold_picks",
+  "what": "Converts template-match score peaks into a cleaned particle star file by applying a score cutoff.",
+  "why": "Scores are normalised to background mean/SD, so the threshold is comparable across tomograms.",
+  "params": [
+   {
+    "name": "minimum",
+    "flag": "--minimum",
+    "default": "3",
+    "range": "3-6",
+    "effect": "Keep peaks at least N standard deviations above background. Higher = fewer false positives, may miss real particles."
+   },
+   {
+    "name": "in_suffix",
+    "flag": "--in_suffix",
+    "default": "(template id)",
+    "range": "string",
+    "effect": "Match the suffix written by ts_template_match."
+   },
+   {
+    "name": "out_suffix",
+    "flag": "--out_suffix",
+    "default": "clean",
+    "range": "string",
+    "effect": "Suffix for the thresholded output star files."
+   }
+  ],
+  "pitfalls": "Start conservative (high minimum), inspect, then relax. The guide uses values up to 6 SD.",
+  "qc": "Particle counts per tomogram are plausible; a 2D/3D classification later should yield clean class averages.",
+  "refs": [
+   "https://github.com/warpem/warp/blob/main/scripts/EMPIAR-10491_5TS_e2e.sh"
+  ]
+ },
+ "ts_export_particles": {
+  "title": "ts_export_particles",
+  "what": "Extracts CTF-corrected particles from the original tilt images at a chosen pixel size and box, writing a RELION-compatible optimisation_set.star.",
+  "why": "Extracts the particles into a RELION project directory. Choose 3D subtomograms for RELION 4 (no --2d) or the 2D image series for RELION 5 --tomo. The subtomo image paths are written RELATIVE to output_processing, so RELION must be launched from that directory. For RELION 4, continue in the 'RELION 4: Class3D' step.",
+  "params": [
+   {
+    "name": "input_directory",
+    "flag": "--input_directory",
+    "default": "warp_tiltseries/matching",
+    "range": "path",
+    "effect": "Where the thresholded pick stars live."
+   },
+   {
+    "name": "input_pattern",
+    "flag": "--input_pattern",
+    "default": "*clean.star",
+    "range": "glob",
+    "effect": "Which pick files to export."
+   },
+   {
+    "name": "output_angpix",
+    "flag": "--output_angpix",
+    "default": "4",
+    "range": "3-5",
+    "effect": "Export pixel size. Choose so Nyquist sits just below your target feature resolution."
+   },
+   {
+    "name": "box",
+    "flag": "--box",
+    "default": "64",
+    "range": "64-96",
+    "effect": "Box size in px at output_angpix. Must comfortably contain the particle plus padding."
+   },
+   {
+    "name": "diameter",
+    "flag": "--diameter",
+    "default": "(Angstrom)",
+    "range": "particle size",
+    "effect": "Particle diameter for normalisation."
+   },
+   {
+    "name": "twod",
+    "flag": "--2d",
+    "default": "on",
+    "range": "flag",
+    "effect": "Export 2D image series (RELION 5 path). Omit for 3D subtomogram volumes."
+   },
+   {
+    "name": "normalized_coords",
+    "flag": "--normalized_coords",
+    "default": "on",
+    "range": "flag",
+    "effect": "Coordinates normalised to tomogram dimensions."
+   },
+   {
+    "name": "relative_output_paths",
+    "flag": "--relative_output_paths",
+    "default": "on",
+    "range": "flag",
+    "effect": "Portable relative paths in the star file."
+   },
+   {
+    "name": "output_processing",
+    "flag": "--output_processing",
+    "default": "relion_<id>",
+    "range": "path",
+    "effect": "Redirect output to a per-target folder so different particle sets at the same pixel size don't overwrite each other."
+   }
+  ],
+  "pitfalls": "Without --output_processing, exporting two targets at the same pixel size can overwrite files in particleseries/subtomo. The produced optimisation_set.star loads directly in relion --tomo.",
+  "qc": "Open the optimisation set in RELION 5 tomo GUI; particle count and pixel size match expectation.",
+  "refs": [
+   "https://warpem.github.io/warp/reference/warptools/advanced_data_flow/",
+   "https://warpem.github.io/warp/user_guide/warptools/quick_start_warptools_tilt_series/"
+  ],
+  "pitfall": "LAUNCH RELION FROM output_processing or every subtomo path is wrong ('file does not exist'). Keep --relative_output_paths ON. RELION 4 does NOT auto-resize the reference — the RELION 4 step pre-scales it for you."
+ },
+ "relion4_convert": {
+  "title": "RELION 4: convert STAR + init ref",
+  "what": "Converts the Warp ts_export_particles star to RELION 4 format and builds a de-novo initial reference, via ml_relion4_convert_star_warp_auto.sh.",
+  "why": "Bridges ts_export_particles and Class3D. It rewrites the relative 'subtomo/' particle paths to absolute (so RELION resolves every subtomogram), runs relion_convert_star (adds Cs/Q0 optics), then samples NREF random particles and relion_reconstructs random_subset_ref.mrc — a ready-made reference so you don't need an external EMDB map. The STAR header is split by auto-detecting the last '_rln' label (replaces the original script's hardcoded head -n 33 / tail -n +35).",
+  "params": [
+   {
+    "name": "project_dir",
+    "flag": "(positional)",
+    "default": "relion4/warp",
+    "range": "path",
+    "effect": "The ts_export_particles output_processing dir; relion runs from here."
+   },
+   {
+    "name": "starfile",
+    "flag": "(positional)",
+    "default": "matching.star",
+    "range": "path relative to project_dir",
+    "effect": "The Warp export star to convert."
+   },
+   {
+    "name": "PARTICLEDIR",
+    "flag": "PARTICLEDIR",
+    "default": "<project_dir>/subtomo/",
+    "range": "absolute path, trailing /",
+    "effect": "Replaces the 'subtomo/' prefix in the star so RELION finds the particles."
+   },
+   {
+    "name": "PATH_MATCH",
+    "flag": "PATH_MATCH",
+    "default": "subtomo/",
+    "range": "path prefix",
+    "effect": "The prefix in the Warp star to rewrite. Change only if export wrote a different one."
+   },
+   {
+    "name": "CS / Q0",
+    "flag": "CS / Q0",
+    "default": "2.7 / 0.07",
+    "range": "300 kV cryo",
+    "effect": "Spherical aberration (mm) and amplitude contrast for relion_convert_star."
+   },
+   {
+    "name": "NREF",
+    "flag": "NREF",
+    "default": "1000",
+    "range": "500-2000",
+    "effect": "Random particles used to reconstruct the initial reference."
+   },
+   {
+    "name": "MAKE_REF",
+    "flag": "MAKE_REF",
+    "default": "1",
+    "range": "0 / 1",
+    "effect": "1 = also build random_subset_ref.mrc; 0 = only convert the star."
+   },
+   {
+    "name": "execute",
+    "flag": "--execute",
+    "default": "off",
+    "range": "toggle",
+    "effect": "Off = dry run (prints the plan + relion commands). On = actually convert + reconstruct."
+   }
+  ],
+  "pitfall": "Runs FROM project_dir (paths are relative to it). PATH_MATCH must match how export wrote the paths or the rewrite is a no-op and RELION can't find the particles. Feed random_subset_ref.mrc into the Class3D step as REF_MAP with REF_ANGPIX = the export output_angpix (it is already at particle scale)."
+ },
+ "relion4_class3d": {
+  "title": "RELION 4: Class3D handoff",
+  "what": "Hands the exported 3D subtomograms to RELION 4 for 3D classification, via ml_relion4_handoff_warp_auto.sh.",
+  "why": "Encodes the fragile parts of the Warp->RELION handoff: it asserts the export is complete and that the star's subtomo paths resolve from the project dir, pre-scales the reference to the particles' pixel size + box (RELION 4 has no auto-resize), parks any stale cross-version pipeline files, and submits Class3D with MPI = #GPUs+1, run FROM the project directory.",
+  "params": [
+   {
+    "name": "project_dir",
+    "flag": "(positional)",
+    "default": "relion4/warp",
+    "range": "path",
+    "effect": "The ts_export_particles output_processing dir; relion runs from here."
+   },
+   {
+    "name": "REF_MAP",
+    "flag": "REF_MAP",
+    "default": "(none)",
+    "range": ".mrc",
+    "effect": "Reference map (e.g. the EMDB map). Rescaled to match the particles."
+   },
+   {
+    "name": "OUTPUT_ANGPIX / BOX",
+    "flag": "OUTPUT_ANGPIX / BOX",
+    "default": "4 / 64",
+    "range": "match export",
+    "effect": "MUST equal the ts_export_particles output_angpix and box."
+   },
+   {
+    "name": "SYMMETRY",
+    "flag": "SYMMETRY",
+    "default": "C1",
+    "range": "point group",
+    "effect": "Classify in C1; symmetrise only at Refine3D."
+   },
+   {
+    "name": "NCLASSES",
+    "flag": "NCLASSES",
+    "default": "4",
+    "range": "3-6",
+    "effect": "Number of 3D classes."
+   },
+   {
+    "name": "GPUS",
+    "flag": "GPUS",
+    "default": "0,1,2,3",
+    "range": "idle GPU ids",
+    "effect": "RELION GPUs; MPI is set to #GPUs+1 automatically."
+   },
+   {
+    "name": "execute",
+    "flag": "--execute",
+    "default": "off",
+    "range": "toggle",
+    "effect": "Off = dry run (prints the plan + relion command). On = actually submit."
+   }
+  ],
+  "pitfall": "RELION 4 is the GPU-native path on this VM class (RELION 5's container CUDA can outrun the host driver -> GPU error-code 35). OUTPUT_ANGPIX/BOX must match the export. Never launch inside another RELION version's project."
+ }
+}

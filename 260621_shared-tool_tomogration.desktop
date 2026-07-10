@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Tomogration
+GenericName=Cryo-ET Pipeline Controller
+Comment=WarpTools / AreTomo2 cryo-ET processing pipeline GUI
+# This is a TEMPLATE. Run install.sh on the VM to write the real launcher with
+# absolute paths into ~/.local/share/applications/ and ~/Desktop/.
+# __PKG_DIR__ is replaced with this folder's absolute path by install.sh.
+Exec=bash "__PKG_DIR__/tomogration.sh"
+Icon=__PKG_DIR__/Tomogration-icon.png
+Terminal=false
+Categories=Science;Education;
+StartupNotify=true
