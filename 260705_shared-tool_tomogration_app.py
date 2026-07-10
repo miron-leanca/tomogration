@@ -3506,6 +3506,7 @@ class Tomogration(QMainWindow):
         self._persist_timer.timeout.connect(self._persist_param_store)
         self._active_stage = None
         self._active_cmd = ""
+        self._active_job_id = None    # set while a card-view job (not a stage) runs
         self._failed_file = None
         self._attempt = 1
         self._max_retries = 20
@@ -4449,8 +4450,68 @@ class Tomogration(QMainWindow):
             self._record_history_start(stage_id, cmd)   # logs + may archive output
         self._active_stage = stage_id
         self._active_cmd = cmd
+        self._active_job_id = None      # this is a three-column stage run, not a job
         self.node_buttons[stage_id].setStyleSheet(DOT_ORANGE)
         self.runner.run(cmd, self.project_root)
+
+    # ---- card-view job runs (Phase 1b) ----
+    # A parallel dispatch path to _dispatch: instead of running a stage at its
+    # conventional STAGE_OUTPUTS path, run a JOB INSTANCE in its own processing
+    # dir (jobs/J###), wired to its parent via --input_processing. The canvas
+    # (Phase 2) calls _run_job; the three-column view keeps using _dispatch. Both
+    # share the single runner, so the busy-check keeps them mutually exclusive.
+    # NOTE: jobs deliberately do NOT auto-recover (that fs_motion_and_ctf retry
+    # logic is bound to the three-column _active_stage/_active_cmd path).
+    def _run_job(self, job_id):
+        if self.runner.busy():
+            self._log("a job is already running — wait for it to finish.", "fail")
+            return
+        store = load_jobs(self.project_root)
+        job = store.get("jobs", {}).get(job_id)
+        if job is None:
+            self._log(f"job {job_id} not found.", "fail")
+            return
+        spec = self._stage_by_id(job["stage_id"])
+        if spec is None:
+            self._log(f"job {job_id}: unknown stage '{job['stage_id']}'.", "fail")
+            return
+        # The processing dir must exist before the run (cwd = project root).
+        try:
+            (Path(self.project_root) / job["output_dir"]).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self._log(f"job {job_id}: cannot create {job['output_dir']}: {e}", "fail")
+            return
+        cmd = build_job_command(spec, job, store, self.warp_launch, self._group_inputs)
+        update_job(self.project_root, job_id, command=cmd, status="running",
+                   exit_code=None, finished=None,
+                   started=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        self._active_job_id = job_id
+        self._active_stage = None
+        self._active_cmd = cmd
+        self._attempt = 1
+        self._failed_file = None
+        self._log(f"--- running {job_id} · {spec['label']} ---", "info")
+        self.runner.run(cmd, self.project_root)
+
+    def _finalize_job(self, code):
+        """Record a finished job: status/exit/finish-time + a per-stage result
+        summary for the card readout. Called from _on_finished."""
+        job_id = self._active_job_id
+        self._active_job_id = None
+        store = load_jobs(self.project_root)
+        job = store.get("jobs", {}).get(job_id)
+        if job is None:
+            return
+        status = "completed" if code == 0 else "failed"
+        summary = summarize_job(job["stage_id"],
+                                Path(self.project_root) / job["output_dir"])
+        update_job(self.project_root, job_id, status=status, exit_code=code,
+                   finished=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   summary=summary)
+        self._log(f"--- {job_id} {status} (exit {code}) ---",
+                  "ok" if code == 0 else "fail")
+        if hasattr(self, "_refresh_canvas"):     # Phase 2 hook; harmless until then
+            self._refresh_canvas()
 
     # ---- processing history ----
     def _non_default_tokens(self, spec, cmd):
@@ -4502,6 +4563,19 @@ class Tomogration(QMainWindow):
         self._history_index = self.project.append_history(rec)
 
     def _on_finished(self, code):
+        # Card-view job runs finalize on their own path (their own store record,
+        # no stage dots / history / auto-recovery). A queued STAGE run may still
+        # start afterwards, so fall through to the chaining block below.
+        if getattr(self, "_active_job_id", None):
+            self._finalize_job(code)
+            self._refresh_status_dots()
+            if self.queue and not self.runner.busy():
+                label, cmd, sid = self.queue.pop(0)
+                self._log(f"--- running {label} ---", "info")
+                self._refresh_queue()
+                self._dispatch(sid, cmd, fresh=True)
+            return
+
         stage_id = self._active_stage
         spec = self._stage_by_id(stage_id)
 
