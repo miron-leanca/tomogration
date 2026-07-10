@@ -519,7 +519,7 @@
  "ts_export_particles": {
   "title": "ts_export_particles",
   "what": "Extracts CTF-corrected particles from the original tilt images at a chosen pixel size and box, writing a RELION-compatible optimisation_set.star.",
-  "why": "Extracts the particles into a RELION project directory. Choose 3D subtomograms for RELION 4 (no --2d) or the 2D image series for RELION 5 --tomo. The subtomo image paths are written RELATIVE to output_processing, so RELION must be launched from that directory. For RELION 4, continue in the 'RELION 4: Class3D' step.",
+  "why": "Extracts the particles into a RELION project directory. Choose 3D subtomograms for RELION 4 (--3d) or the 2D image series for RELION 5 --tomo. The subtomo image paths are written RELATIVE to output_processing, so RELION must be launched from that directory. For RELION 4, continue in the 'RELION 4: Class3D' step.",
   "params": [
    {
     "name": "input_directory",
@@ -557,11 +557,11 @@
     "effect": "Particle diameter for normalisation."
    },
    {
-    "name": "twod",
-    "flag": "--2d",
-    "default": "on",
-    "range": "flag",
-    "effect": "Export 2D image series (RELION 5 path). Omit for 3D subtomogram volumes."
+    "name": "relion_format",
+    "flag": "--3d / --2d",
+    "default": "--3d (RELION 4)",
+    "range": "choice",
+    "effect": "Exactly one is required: --3d = 3D subtomogram volumes (RELION 4); --2d = 2D image series (RELION 5 --tomo)."
    },
    {
     "name": "normalized_coords",

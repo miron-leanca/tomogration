@@ -1839,12 +1839,13 @@ STAGES = [
              "default": "", "help": "Particle diameter (Å)."},
             {"name": "relion_format", "kind": "choice", "flag": None,
              "choices": [
-                 ("3D subtomograms (RELION 4)", ""),
+                 ("3D subtomograms (RELION 4)", "--3d"),
                  ("2D image series (RELION 5)", "--2d"),
              ],
-             "default": "",
-             "help": "RELION 4 uses 3D subtomos (no --2d). RELION 5 --tomo uses the 2D "
-             "image series (--2d). Pick to match the RELION you'll hand off to."},
+             "default": "--3d",
+             "help": "RELION 4 uses 3D subtomos (--3d). RELION 5 --tomo uses the 2D "
+             "image series (--2d). WarpTools needs exactly one of these — pick to match "
+             "the RELION you'll hand off to."},
             {"name": "normalized_coords", "kind": "check", "flag": "--normalized_coords",
              "default": True, "help": "Coords normalised to tomogram dimensions."},
             {"name": "relative_output_paths", "kind": "check",
@@ -1861,7 +1862,7 @@ STAGES = [
             "what": "Extracts CTF-corrected particles into a RELION project dir — a "
                     "particles star (+ optimisation_set.star for RELION 5).",
             "range": "box 64-128; output_angpix 3-5 for most targets.",
-            "effect": "3D subtomos (no --2d) = RELION 4; --2d = RELION 5 --tomo. Paths are "
+            "effect": "3D subtomos (--3d) = RELION 4; --2d = RELION 5 --tomo. Paths are "
                       "relative to output_processing — that dir IS the RELION project root.",
             "pitfall": "LAUNCH RELION FROM output_processing, or every subtomo path is "
                        "wrong ('file does not exist'). RELION 4 does NOT auto-resize the "
@@ -3498,6 +3499,12 @@ class Tomogration(QMainWindow):
         # edits stick (across stage switches AND restarts) until they change them again,
         # hit "Reset defaults", or a dynamic default (e.g. a newer AreTomo version) wins.
         self._param_store = self._load_config().get("param_store", {})
+        # Migration: the export 3D/2D choice used to emit "" for 3D (so --3d was
+        # missing and had to be typed by hand). Any persisted "" is rewritten to
+        # the real flag so the fix takes even on machines with an old stored value.
+        _ep = self._param_store.get("ts_export_particles")
+        if isinstance(_ep, dict) and _ep.get("relion_format") == "":
+            _ep["relion_format"] = "--3d"
         # Debounce disk writes: a single-shot timer flushes _param_store to config
         # ~0.6s after the last edit (so typing doesn't hammer the JSON).
         self._persist_timer = QTimer(self)
