@@ -126,13 +126,42 @@ with tempfile.TemporaryDirectory() as tmp:
     for i in range(3):
         (jd / f"Position{i:03d}.xml").write_text("<xml/>")
     (jd / "matching.star").write_text("data_\n")
-    summ = app.summarize_job("ts_ctf", jd)
-    check("generic counts xml", summ.get("xml") == 3)
-    check("generic counts star", summ.get("star") == 1)
+    check("generic fallback for unknown stage",
+          app.summarize_job("gain_convert", jd).get("xml") == 3)
     check("summarize missing dir -> {}", app.summarize_job("ts_ctf", root / "nope") == {})
 
     cnt, capped = app._count_glob(jd, "*.xml", cap=2)
     check("count_glob caps", cnt == 2 and capped is True)
+
+    # ---- ts_ctf summarizer: parse the <CTF> scalar Defocus, not GridCTF -----
+    # Minimal fixture mirroring the real VM XML: a <CTF> block with the scalar
+    # Defocus, plus a <GridCTF> whose per-tilt <Node Value=...> must be IGNORED.
+    def ctf_xml(defocus):
+        nodes = "\n".join(f'<Node X="0" Y="0" Z="{z}" Value="9.99" />' for z in range(3))
+        return (f'<CTF>\n<Param Name="DefocusDelta" Value="0.03" />\n'
+                f'<Param Name="Defocus" Value="{defocus}" />\n'
+                f'<Param Name="DefocusAngle" Value="61" />\n</CTF>\n'
+                f'<GridCTF>\n{nodes}\n</GridCTF>\n')
+    cd = root / "jobs" / "Jctf"
+    cd.mkdir(parents=True)
+    for i, dz in enumerate((5.0, 5.5, 6.0)):
+        (cd / f"Position{i:03d}.xml").write_text(ctf_xml(dz))
+    (cd / "empty.xml").write_text("<CTF></CTF>")           # no Defocus -> skipped
+    summ = app.summarize_job("ts_ctf", cd)
+    check("ctf counts only series with defocus", summ.get("series") == 3)
+    check("ctf mean±std of scalar defocus", summ.get("defocus_um") == "5.50 ± 0.41")
+    check("ctf ignores GridCTF nodes (mean not 9.99)", "9.99" not in summ.get("defocus_um", ""))
+
+    # ---- ts_reconstruct summarizer: count tomograms + parse angpix ---------
+    rd = root / "jobs" / "Jrec" / "reconstruction"
+    rd.mkdir(parents=True)
+    for i in range(4):
+        (rd / f"Position{i:03d}_10.00Apx.mrc").write_bytes(b"\0")
+    summ = app.summarize_job("ts_reconstruct", root / "jobs" / "Jrec")
+    check("reconstruct counts tomograms", summ.get("tomograms") == 4)
+    check("reconstruct parses angpix", summ.get("angpix") == "10.00")
+    check("reconstruct empty when no reconstruction/ dir",
+          app.summarize_job("ts_reconstruct", cd) == {})
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

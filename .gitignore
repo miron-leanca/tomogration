@@ -23,6 +23,9 @@ jobs/
 groups/
 selected*/
 
+# Claude Code local state (per-machine permission allowlist, absolute paths)
+.claude/settings.local.json
+
 # OS / editor cruft
 .DS_Store
 __pycache__/

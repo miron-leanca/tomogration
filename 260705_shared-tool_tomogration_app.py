@@ -2423,7 +2423,70 @@ def summarize_generic(job_dir):
     return out
 
 
-STAGE_SUMMARIZERS = {}
+# One <CTF> block per series XML holds the fitted per-series AVERAGE defocus as
+# `<Param Name="Defocus" Value="5.25432" />` (µm); DefocusDelta = astigmatism mag,
+# DefocusAngle = its angle. The per-TILT values live in <GridCTF><Node Value=.../>
+# (no Name= attr), so `Name="Defocus"` matches the scalar uniquely. The <CTF> block
+# sits near the top, before the long GridCTF node lists, so a bounded head read
+# gets it without parsing the whole (~430 KB) file. (VM sample 2026-07-10.)
+_CTF_DEFOCUS_RE = re.compile(r'Name="Defocus"\s+Value="([-\d.eE]+)"')
+_APX_RE = re.compile(r'_([\d.]+)Apx\.mrc$')
+
+
+def _mean_std(vals):
+    m = sum(vals) / len(vals)
+    return m, (sum((v - m) ** 2 for v in vals) / len(vals)) ** 0.5
+
+
+def summarize_ts_ctf(job_dir):
+    """series count + mean±std of the per-series average defocus (µm)."""
+    d = Path(job_dir)
+    if not d.is_dir():
+        return {}
+    vals = []
+    for xml in itertools.islice(sorted(d.glob("*.xml")), 0, 5000):
+        try:
+            with xml.open("r", errors="ignore") as fh:
+                head = fh.read(16384)               # <CTF> is well within this
+        except OSError:
+            continue
+        m = _CTF_DEFOCUS_RE.search(head)
+        if m:
+            try:
+                vals.append(float(m.group(1)))
+            except ValueError:
+                pass
+    if not vals:
+        return {}
+    mean, std = _mean_std(vals)
+    return {"series": len(vals), "defocus_um": f"{mean:.2f} ± {std:.2f}"}
+
+
+def summarize_ts_reconstruct(job_dir):
+    """tomogram count (+ pixel size parsed from the ..._<N>Apx.mrc name). A job's
+    tomograms land in <job>/reconstruction/ (confirmed on the VM branch test)."""
+    rec = Path(job_dir) / "reconstruction"
+    if not rec.is_dir():
+        return {}
+    n, apx = 0, None
+    for mrc in itertools.islice(rec.glob("*.mrc"), 0, 5000):
+        n += 1
+        if apx is None:
+            m = _APX_RE.search(mrc.name)
+            if m:
+                apx = m.group(1)
+    if not n:
+        return {}
+    out = {"tomograms": n}
+    if apx:
+        out["angpix"] = apx
+    return out
+
+
+STAGE_SUMMARIZERS = {
+    "ts_ctf": summarize_ts_ctf,
+    "ts_reconstruct": summarize_ts_reconstruct,
+}
 
 
 def summarize_job(stage_id, job_dir):
