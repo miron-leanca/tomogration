@@ -1758,13 +1758,14 @@ STAGES = [
             {"name": "template_path", "kind": "text", "flag": "--template_path",
              "default": "", "help": "Path to a local template .mrc. Set EITHER this OR "
              "template_emdb (not both)."},
-            {"name": "output_suffix", "kind": "text", "flag": "--output_suffix",
-             "default": "", "help": "Suffix that names THIS pick set's output star files "
-             "(…_<suffix>.star in warp_tiltseries/matching/). Use a different suffix per run "
-             "to keep parallel pick sets side by side — threshold_picks/export then choose "
-             "which set via its --in_suffix (this is how you fork picking). Blank = Warp's "
-             "default name from the template. VERIFY the flag name with ts_template_match "
-             "--help if it errors."},
+            {"name": "override_suffix", "kind": "text", "flag": "--override_suffix",
+             "default": "", "help": "Overrides the STAR suffix (normally derived from the "
+             "template name) so this pick set gets its OWN name: files become "
+             "warp_tiltseries/matching/<pos>_<tomo_angpix>Apx<suffix>.star. INCLUDE A LEADING "
+             "UNDERSCORE if you want one (e.g. '_run2'; without it the suffix abuts 'Apx'). "
+             "Use a different suffix per run to keep parallel pick sets side by side — "
+             "threshold_picks / export then pick a set via --in_suffix (this is how you fork "
+             "picking). Blank = default template-derived name."},
             {"name": "subdivisions", "kind": "slider_int", "flag": "--subdivisions",
              "default": 3, "min": 1, "max": 6, "step": 1,
              "help": "Angular subdivisions of the search (finer = more orientations, slower)."},
@@ -1780,6 +1781,26 @@ STAGES = [
             {"name": "check_hand", "kind": "slider_int", "flag": "--check_hand",
              "default": 2, "min": 0, "max": 2, "step": 1,
              "help": "2 = verify geometry/handedness during matching."},
+            {"name": "npeaks", "kind": "slider_int", "flag": "--npeaks",
+             "default": 2000, "min": 100, "max": 50000, "step": 500,
+             "help": "Max peaks SAVED per tilt series. This is a HARD CAP — if a series "
+             "actually has more particles you'll silently keep only the top-scoring 2000. "
+             "For crowded samples raise it (you can tell you're capped when every series "
+             "returns exactly this many). Costs disk, not match time."},
+            {"name": "peak_distance", "kind": "text", "flag": "--peak_distance",
+             "default": "", "help": "Minimum spacing between peaks in Å. Blank = the template "
+             "diameter. Lower it (e.g. 30) for tightly-packed particles so neighbours aren't "
+             "suppressed; raise it to avoid double-picking one particle."},
+            {"name": "max_missing_tilts", "kind": "slider_int", "flag": "--max_missing_tilts",
+             "default": 2, "min": -1, "max": 20, "step": 1,
+             "help": "Drop positions not covered by at least this many tilts. -1 disables "
+             "culling (keep everything, e.g. thin/edge regions); default 2."},
+            {"name": "subvolume_size", "kind": "slider_int", "flag": "--subvolume_size",
+             "default": 192, "min": 48, "max": 512, "step": 16,
+             "help": "Local matching TILE size, in TOMOGRAM pixels (at tomo_angpix, NOT raw "
+             "pixels). Just needs to comfortably exceed the template — 192 does so hugely. "
+             "It is NOT the particle box (that's export --box). Reduce only if you hit GPU "
+             "OOM or want speed; keep it even (FFT-friendly)."},
             {"name": "device_list", "kind": "text", "flag": "--device_list", "gpu_sep": " ",
              "default": "", "help": "GPU id(s), space-separated e.g. '2 3'. BLANK = ALL "
              "GPUs (Warp's default — it WILL grab 0/1). Set this to the idle cards (check "

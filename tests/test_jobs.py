@@ -210,11 +210,15 @@ with tempfile.TemporaryDirectory() as tmp:
 # ---- ts_template_match new params + validate ------------------------------
 tm = next(s for s in app.STAGES if s["id"] == "ts_template_match")
 v = app.stage_defaults(tm)
-v["template_emdb"] = "70905"; v["optimize_poses"] = True; v["output_suffix"] = "run2"
+v["template_emdb"] = "70905"; v["optimize_poses"] = True; v["override_suffix"] = "_run2"
+v["peak_distance"] = "30"; v["max_missing_tilts"] = -1; v["npeaks"] = 8000
 cmd = app.build_command(tm, v)
 check("template_match emits --template_emdb", "--template_emdb 70905" in cmd)
 check("template_match emits --optimize_poses", "--optimize_poses" in cmd)
-check("template_match emits --output_suffix", "--output_suffix run2" in cmd)
+check("template_match emits --override_suffix", "--override_suffix _run2" in cmd)
+check("template_match emits --peak_distance", "--peak_distance 30" in cmd)
+check("template_match emits --max_missing_tilts -1", "--max_missing_tilts -1" in cmd)
+check("template_match emits --npeaks", "--npeaks 8000" in cmd)
 check("template blank -> no template flags",
       "--template_emdb" not in app.build_command(tm, app.stage_defaults(tm)))
 check("validate warns when neither template set", bool(tm["validate"](app.stage_defaults(tm))))
