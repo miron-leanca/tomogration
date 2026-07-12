@@ -207,5 +207,31 @@ with tempfile.TemporaryDirectory() as tmp:
           app.summary_text({"tomograms": 290, "angpix": "10.00"}) == "290 tomo · 10.00 Å")
     check("summary_text empty -> ''", app.summary_text({}) == "")
 
+# ---- GPU-list separator normalisation (pure) ------------------------------
+check("norm gpu comma->space", app._norm_gpu("0,1,2,3", " ") == "0 1 2 3")
+check("norm gpu space->comma", app._norm_gpu("0 1 2 3", ",") == "0,1,2,3")
+check("norm gpu mixed->comma", app._norm_gpu("0, 1 2,3", ",") == "0,1,2,3")
+check("norm gpu preserves repeats", app._norm_gpu("0 0 0", ",") == "0,0,0")
+check("norm gpu no sep = untouched", app._norm_gpu("0 1 2 3", None) == "0 1 2 3")
+check("norm gpu empty", app._norm_gpu("", " ") == "")
+
+# through build_command on the real stage specs
+ctf = next(s for s in app.STAGES if s["id"] == "ts_ctf")
+vals = app.stage_defaults(ctf)
+vals["device_list"] = "0,1,2,3"                       # user typed commas
+cmd = app.build_command(ctf, vals)
+check("device_list normalised to spaces in cmd", "--device_list 0 1 2 3" in cmd)
+
+rel = next(s for s in app.STAGES if s["id"] == "relion4_class3d")
+vals = app.stage_defaults(rel)
+vals["GPUS"] = "0 1 2 3"                               # user typed spaces
+cmd = app.build_command(rel, vals)
+check("GPUS normalised to commas in cmd", "GPUS=0,1,2,3" in cmd)
+
+# --3d still emitted (regression guard from the earlier fix)
+exp = next(s for s in app.STAGES if s["id"] == "ts_export_particles")
+check("export still emits --3d by default",
+      "--3d" in app.build_command(exp, app.stage_defaults(exp)).split())
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

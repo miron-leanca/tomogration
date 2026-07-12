@@ -1274,7 +1274,7 @@ STAGES = [
             {"name": "out_average_halves", "kind": "check", "flag": "--out_average_halves",
              "default": True, "help": "Write odd/even half-averages (for Noise2Noise "
              "denoising)."},
-            {"name": "device_list", "kind": "text", "flag": "--device_list",
+            {"name": "device_list", "kind": "text", "flag": "--device_list", "gpu_sep": " ",
              "default": "0", "help": "GPU id(s), e.g. 0 or '0 1'."},
             {"name": "perdevice", "kind": "slider_int", "flag": "--perdevice",
              "default": 2, "min": 1, "max": 4, "step": 1,
@@ -1368,7 +1368,7 @@ STAGES = [
              "default": "warp_tiltseries.settings", "help": "ts .settings file."},
             {"name": "angpix", "kind": "text", "flag": "--angpix",
              "default": "", "help": "Output pixel size (Å/px). Blank = native."},
-            {"name": "device_list", "kind": "text", "flag": "--device_list",
+            {"name": "device_list", "kind": "text", "flag": "--device_list", "gpu_sep": " ",
              "default": "0", "help": "GPU id(s)."},
             {"name": "perdevice", "kind": "slider_int", "flag": "--perdevice",
              "default": 2, "min": 1, "max": 4, "step": 1, "help": "Workers per GPU."},
@@ -1403,7 +1403,7 @@ STAGES = [
              "extra tokens here shift the positional args and corrupt angpix)."},
             {"name": "angpix", "kind": "text", "flag": None,
              "default": "1.57", "help": "Input pixel size (Å/px). 1.57 for this data."},
-            {"name": "ARETOMO_GPUS", "kind": "env", "flag": "ARETOMO_GPUS",
+            {"name": "ARETOMO_GPUS", "kind": "env", "flag": "ARETOMO_GPUS", "gpu_sep": " ",
              "default": "0 1 2 3",
              "help": "GPUs to spread tilt series across (space- or comma-separated). Each "
              "series runs on ONE GPU; with N GPUs, N series align at once (~N× faster). "
@@ -1485,7 +1485,7 @@ STAGES = [
              "'0'). >1 makes torch spawn one trainer per GPU and they race to wipe the "
              "shared pool dir → FileNotFoundError on a partition_*.pickle. Scale speed "
              "with RECON devices + dataloaders instead."},
-            {"name": "MA_RECON_DEVICES", "kind": "env", "flag": "MA_RECON_DEVICES",
+            {"name": "MA_RECON_DEVICES", "kind": "env", "flag": "MA_RECON_DEVICES", "gpu_sep": ",",
              "default": "0,0,0", "help": "--reconstruction-devices: this is where you add "
              "GPUs for speed (recon feeds the pool and is the bottleneck). e.g. '0,1,2,3' "
              "or repeat an id to stack workers on it ('0,0,0')."},
@@ -1551,7 +1551,7 @@ STAGES = [
             {"name": "MA_MODEL_RUN_DIR", "kind": "env", "flag": "MA_MODEL_RUN_DIR",
              "default": "", "help": "REQUIRED: the finished TRAINING run dir holding "
              "iter1/model.ckpt … iterN/model.ckpt (e.g. <selected>/warp_tiltseries)."},
-            {"name": "MA_INFER_DEVICES", "kind": "env", "flag": "MA_INFER_DEVICES",
+            {"name": "MA_INFER_DEVICES", "kind": "env", "flag": "MA_INFER_DEVICES", "gpu_sep": ",",
              "default": "0,1,2,3", "help": "GPUs for alignment (CUDA_VISIBLE_DEVICES). "
              "Inference has no training race, so use all the idle cards (check util%)."},
             {"name": "MA_START_ITER", "kind": "env_int", "flag": "MA_START_ITER",
@@ -1680,7 +1680,7 @@ STAGES = [
              "default": "7", "help": "CTF fit max resolution (Å)."},
             {"name": "defocus_max", "kind": "text", "flag": "--defocus_max",
              "default": "8", "help": "Max defocus to search (µm)."},
-            {"name": "device_list", "kind": "text", "flag": "--device_list",
+            {"name": "device_list", "kind": "text", "flag": "--device_list", "gpu_sep": " ",
              "default": "0", "help": "GPU id(s)."},
             {"name": "perdevice", "kind": "slider_int", "flag": "--perdevice",
              "default": 2, "min": 1, "max": 4, "step": 1, "help": "Workers per GPU."},
@@ -1711,7 +1711,7 @@ STAGES = [
              "viewable/pickable tomogram. DO NOT use native (1.57) for full tomograms: "
              "the volume scales as (10/1.57)³ ≈ 260×, so each is tens of GB and ~40 min. "
              "Particles get reconstructed at fine res later by ts_export_particles."},
-            {"name": "device_list", "kind": "text", "flag": "--device_list",
+            {"name": "device_list", "kind": "text", "flag": "--device_list", "gpu_sep": " ",
              "default": "0", "help": "GPU id(s), e.g. 0 or '0 1'. Pick GPUs whose "
              "nvidia-smi GPU-Util is ~0% — low memory-used alone does NOT mean free."},
             {"name": "perdevice", "kind": "slider_int", "flag": "--perdevice",
@@ -1763,7 +1763,7 @@ STAGES = [
             {"name": "check_hand", "kind": "slider_int", "flag": "--check_hand",
              "default": 2, "min": 0, "max": 2, "step": 1,
              "help": "2 = verify geometry/handedness during matching."},
-            {"name": "device_list", "kind": "text", "flag": "--device_list",
+            {"name": "device_list", "kind": "text", "flag": "--device_list", "gpu_sep": " ",
              "default": "", "help": "GPU id(s), space-separated e.g. '2 3'. BLANK = ALL "
              "GPUs (Warp's default — it WILL grab 0/1). Set this to the idle cards (check "
              "nvidia-smi util%) to leave others' jobs alone. Or prefix CUDA_VISIBLE_DEVICES=2,3."},
@@ -1973,9 +1973,9 @@ STAGES = [
              "default": "C1", "help": "Classify in C1; symmetrise only at Refine3D."},
             {"name": "NCLASSES", "kind": "env_int", "flag": "NCLASSES",
              "default": 4, "min": 1, "max": 12, "step": 1, "help": "Number of 3D classes (K)."},
-            {"name": "GPUS", "kind": "env", "flag": "GPUS",
-             "default": "0,1,2,3", "help": "GPU ids for RELION (idle ones — check util%). "
-             "MPI is set to (#GPUs + 1) automatically."},
+            {"name": "GPUS", "kind": "env", "flag": "GPUS", "gpu_sep": ",",
+             "default": "0,1,2,3", "help": "GPU ids for RELION, comma- or space-separated "
+             "(idle ones — check util%). MPI is set to (#GPUs + 1) automatically."},
             {"name": "execute", "kind": "check", "flag": "--execute",
              "default": False, "help": "OFF = dry run (prints the plan + relion command, "
              "runs nothing). Turn ON to actually submit Class3D."},
@@ -2093,6 +2093,16 @@ def stage_defaults(spec):
     return {p["name"]: p.get("default") for p in spec.get("params", [])}
 
 
+def _norm_gpu(s, sep):
+    """Normalise a GPU-id list to the separator the target tool wants, so the user
+    can type either '0 1 2 3' or '0,1,2,3' anywhere and it comes out correct
+    (WarpTools/AreTomo need spaces; RELION/miss-alignment need commas). No-op when
+    the param has no gpu_sep hint."""
+    if not sep or not s:
+        return s
+    return sep.join(t for t in re.split(r"[ ,]+", s.strip()) if t)
+
+
 def build_command(spec, values, warp_cmd=None, group_inputs=None):
     """Pure command assembler (no Qt) — the single source of truth the editable
     command box is seeded from. env/env_int params become a VAR=value prefix;
@@ -2107,7 +2117,7 @@ def build_command(spec, values, warp_cmd=None, group_inputs=None):
         v = values.get(p["name"])
         kind = p["kind"]
         if kind in ("env", "env_int"):
-            s = str(v).strip()
+            s = _norm_gpu(str(v).strip(), p.get("gpu_sep"))
             if s != "":
                 env_parts.append(f"{p['flag']}='{s}'" if any(c in s for c in " \t")
                                  else f"{p['flag']}={s}")
@@ -2115,9 +2125,9 @@ def build_command(spec, values, warp_cmd=None, group_inputs=None):
             if v:
                 body_parts.append(p["flag"])
         else:
-            s = str(v).strip()
+            s = _norm_gpu(str(v).strip(), p.get("gpu_sep"))
             if s != "":
-                body_parts.append(f"{p['flag']} {v}" if p.get("flag") else str(v))
+                body_parts.append(f"{p['flag']} {s}" if p.get("flag") else s)
     # Active tilt-series group: restrict this step to the subset via --input_data
     # (unless the user already typed an --input_data into the params).
     scope = spec.get("group_scope")
@@ -2505,8 +2515,8 @@ def summarize_job(stage_id, job_dir):
 # Card-canvas layout (Phase 2) — PURE (no Qt), so it's unit-testable. Maps the
 # job store + STAGES onto positioned nodes + edges the QGraphicsView draws.
 # ===========================================================================
-CARD_W, CARD_H = 184, 66          # card box size (scene units)
-GAP_X, GAP_Y = 44, 34             # spacing between forks (x) and stages (y)
+CARD_W, CARD_H = 210, 92          # card box size (scene units)
+GAP_X, GAP_Y = 44, 30             # spacing between forks (x) and stages (y)
 
 
 def summary_text(summary):
@@ -3597,11 +3607,35 @@ class _CardItem(QGraphicsRectItem):
         super().mousePressEvent(ev)
 
 
+class _DetailsChip(QGraphicsRectItem):
+    """Small 'Details ▸' button on a card; opens the Details side pane. Its own
+    mousePressEvent handles the click so it doesn't also select the card."""
+    def __init__(self, node, canvas, x, y, w=64, h=18):
+        super().__init__(0, 0, w, h)
+        self._node = node
+        self._canvas = canvas
+        self.setPos(x, y)
+        self.setBrush(QBrush(QColor("#2a3340")))
+        self.setPen(QPen(QColor("#3a6ea5")))
+        self.setCursor(Qt.PointingHandCursor)
+        t = QGraphicsSimpleTextItem("Details ▸", self)
+        t.setBrush(QColor("#9ec5ff"))
+        f = QFont()
+        f.setPointSize(8)
+        t.setFont(f)
+        t.setPos(7, 2)
+
+    def mousePressEvent(self, ev):
+        self._canvas._details(self._node)
+        ev.accept()
+
+
 class JobCanvas(QWidget):
-    def __init__(self, root_getter, on_pick, parent=None):
+    def __init__(self, root_getter, on_pick, on_details=None, parent=None):
         super().__init__(parent)
         self._root_getter = root_getter      # callable -> project_root str
         self._on_pick = on_pick              # callable(stage_id)
+        self._on_details = on_details        # callable(node) | None
         self.scene = QGraphicsScene(self)
         self.view = QGraphicsView(self.scene)
         self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -3636,48 +3670,55 @@ class JobCanvas(QWidget):
 
     def _add_card(self, n):
         fill, border = _CARD_STYLE.get(n["status"], _CARD_STYLE["ghost"])
+        ghost = n["is_ghost"]
         item = _CardItem(n, self)
         item.setBrush(QBrush(QColor(fill)))
         pen = QPen(QColor(border))
         pen.setWidth(2)
-        if n["is_ghost"]:
+        if ghost:
             pen.setStyle(Qt.PenStyle.DashLine)
         item.setPen(pen)
         self.scene.addItem(item)
 
-        title = QGraphicsSimpleTextItem(n["label"], item)
-        title.setBrush(QColor("#8a8a8a" if n["is_ghost"] else "#ececec"))
-        tf = QFont()
-        tf.setPointSize(11)
-        tf.setBold(True)
-        title.setFont(tf)
-        title.setPos(11, 9)
+        def text(s, x, y, pt, colour, bold=False):
+            t = QGraphicsSimpleTextItem(s, item)
+            t.setBrush(QColor(colour))
+            f = QFont()
+            f.setPointSize(pt)
+            f.setBold(bold)
+            t.setFont(f)
+            t.setPos(x, y)
+            return t
 
-        if n["is_ghost"]:
+        # group tag (tiny) · title (bold) · status/summary · J### badge
+        text(n.get("group", ""), 11, 7, 8, "#6f6f6f")
+        text(n["label"], 11, 22, 11, "#8a8a8a" if ghost else "#ececec", bold=True)
+        if ghost:
             sub = "not built"
         else:
             st = summary_text(n["summary"])
             sub = n["status"] + (f" · {st}" if st else "")
-        subitem = QGraphicsSimpleTextItem(sub, item)
-        subitem.setBrush(QColor("#7d7d7d"))
-        sf = QFont()
-        sf.setPointSize(9)
-        subitem.setFont(sf)
-        subitem.setPos(11, 36)
+        text(sub[:34], 11, 46, 9, "#7d7d7d")
+        if not ghost:
+            text(n["id"], n["w"] - 42, 7, 8, "#9ec5ff")
 
-        if not n["is_ghost"]:
-            badge = QGraphicsSimpleTextItem(n["id"], item)
-            badge.setBrush(QColor("#9ec5ff"))
-            bf = QFont()
-            bf.setPointSize(8)
-            badge.setFont(bf)
-            badge.setPos(n["w"] - 42, 9)
+        # Details chip (only if the canvas has a details handler)
+        if self._on_details is not None:
+            self.scene.addItem(_DetailsChip(n, self, n["x"] + n["w"] - 72,
+                                            n["y"] + n["h"] - 24))
 
     def _pick(self, node):
         try:
             self._on_pick(node["stage_id"])
         except Exception:
             pass
+
+    def _details(self, node):
+        if self._on_details is not None:
+            try:
+                self._on_details(node)
+            except Exception:
+                pass
 
 
 # ===========================================================================
@@ -3759,60 +3800,54 @@ class Tomogration(QMainWindow):
 
         self._build_menus()
 
-        # LEFT work area: per-job docs (top) over [job lists | alignment + command].
-        left = QSplitter(Qt.Vertical)
-        left.setHandleWidth(8)
-        left.addWidget(self._panel("docsCard", "Per-job information",
-                                   self._build_docs_panel()))
-        work = QSplitter(Qt.Horizontal)
-        work.setHandleWidth(8)
-        # The stage picker is a QStackedWidget: page 0 = the classic 3-column
-        # stage lists, page 1 = the card canvas. Both drive the SAME form/command
-        # panel beside them (selecting a card == clicking a stage row), so the
-        # toggle only changes HOW you pick a node, nothing downstream.
+        # ---- persistent leaf panels (built once; the two view layouts just
+        # arrange these same widgets differently, so no state is duplicated) ----
+        self.docs_card = self._panel("docsCard", "Per-job information",
+                                     self._build_docs_panel())
+        # Stage picker: page 0 = classic 3-column lists, page 1 = card canvas.
+        # Both drive the SAME job builder, so the toggle only changes HOW you
+        # pick a node, nothing downstream.
         self.job_stack = QStackedWidget()
         self.job_stack.addWidget(
             self._panel("listsCard", "Pipeline jobs", self._build_job_lists()))
-        self.canvas = JobCanvas(lambda: self.project_root, self._canvas_pick)
+        self.canvas = JobCanvas(lambda: self.project_root, self._canvas_pick,
+                                on_details=self._show_card_details)
         self.job_stack.addWidget(
             self._panel("canvasCard", "Workflow graph", self.canvas))
-        work.addWidget(self.job_stack)
-        work.addWidget(self._build_align_and_command())     # builds its own cards
-        work.setSizes([330, 470])
-        self._work_split = work
-        left.addWidget(work)
-        left.setSizes([320, 580])
-
-        # RIGHT monitor area: directory overview / terminal / jobs queue.
-        right = QSplitter(Qt.Vertical)
-        right.setHandleWidth(8)
-        right.addWidget(self._panel("dirCard", "Directory overview",
-                                    self._build_directory_overview()))
-        right.addWidget(self._panel("rightCard", "Terminal",
-                                    self._build_terminal_panel()))
-        right.addWidget(self._panel("queueCard", "Jobs queue",
-                                    self._build_queue_panel()))
-        right.setSizes([240, 470, 120])
-
-        main = QSplitter(Qt.Horizontal)
-        main.setHandleWidth(8)
-        main.addWidget(left)
-        main.addWidget(right)
-        main.setSizes([1000, 500])
+        self._build_align_and_command()   # sets self.align_list_card + self.command_card
+        self.details_card = self._panel("detailsCard", "Job details",
+                                        self._build_details_panel())
+        self.dir_card = self._panel("dirCard", "Directory overview",
+                                    self._build_directory_overview())
+        self.terminal_card = self._panel("rightCard", "Terminal",
+                                          self._build_terminal_panel())
+        self.queue_card = self._panel("queueCard", "Jobs queue",
+                                      self._build_queue_panel())
+        # Stash keeps panels parented (and hidden) while they're not in the live
+        # layout — a parentless shown QWidget would pop up as its own window.
+        self._stash = QWidget()
+        self._stash.hide()
+        self._panels = [self.docs_card, self.job_stack, self.align_list_card,
+                        self.command_card, self.details_card, self.dir_card,
+                        self.terminal_card, self.queue_card]
 
         central = QWidget()
         cv = QVBoxLayout(central)
         cv.setContentsMargins(8, 6, 8, 8)
         cv.setSpacing(6)
         cv.addWidget(self._build_root_bar())
-        cv.addWidget(main, 1)
+        self._layout_host = QWidget()          # holds the current mode's main splitter
+        self._layout_host_v = QVBoxLayout(self._layout_host)
+        self._layout_host_v.setContentsMargins(0, 0, 0, 0)
+        cv.addWidget(self._layout_host, 1)
         self.setCentralWidget(central)
+
+        start_mode = "canvas" if self._load_config().get("view_mode") == "canvas" else "lists"
+        self._apply_layout(start_mode)
 
         self._refresh_status_dots()
         self._select_stage(self._stage_by_id("ts_reconstruct") or STAGES[0])
         self._save_config({**self._load_config(), "last_root": self.project_root})
-        if self._load_config().get("view_mode") == "canvas":
-            self._set_view_mode("canvas")
 
     # ---- menu bar (affordances live here to keep the center panel narrow) ----
     def _build_menus(self):
@@ -3852,19 +3887,167 @@ class Tomogration(QMainWindow):
             self.canvas.refresh()
 
     def _toggle_view(self):
-        going_to_canvas = self.job_stack.currentIndex() == 0
-        self._set_view_mode("canvas" if going_to_canvas else "lists")
+        self._apply_layout("lists" if self._view_mode == "canvas" else "canvas")
 
-    def _set_view_mode(self, mode):
+    @staticmethod
+    def _clear_box(layout):
+        while layout.count():
+            it = layout.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.setParent(None)
+
+    def _apply_layout(self, mode):
+        """Arrange the persistent leaf panels for the chosen view. LIST mode is the
+        classic 3-column layout; CARD mode gives the canvas ~2/3 on the left (with a
+        collapsible Details pane) and stacks the job builder over the terminal on the
+        right. Same widgets, rebuilt containers — so no state is duplicated."""
+        self._view_mode = mode
         canvas = (mode == "canvas")
+        # Park every leaf in the stash first so none becomes an orphan top-level
+        # window while we swap containers, then drop the previous main splitter.
+        for w in self._panels:
+            w.setParent(self._stash)
+        self._clear_box(self._layout_host_v)
         self.job_stack.setCurrentIndex(1 if canvas else 0)
+
+        if canvas:
+            self._canvas_split = QSplitter(Qt.Horizontal)
+            self._canvas_split.setHandleWidth(8)
+            self._canvas_split.addWidget(self.job_stack)
+            self._canvas_split.addWidget(self.details_card)
+            self.details_card.setVisible(False)          # revealed by "Details"
+            rightcol = QSplitter(Qt.Vertical)
+            rightcol.setHandleWidth(8)
+            rightcol.addWidget(self.command_card)
+            rightcol.addWidget(self.terminal_card)
+            rightcol.setSizes([460, 380])
+            main = QSplitter(Qt.Horizontal)
+            main.setHandleWidth(8)
+            main.addWidget(self._canvas_split)
+            main.addWidget(rightcol)
+            main.setSizes([1080, 520])                   # ~2/3 canvas, 1/3 right
+        else:
+            self._canvas_split = None
+            form_area = QSplitter(Qt.Vertical)
+            form_area.setHandleWidth(8)
+            form_area.addWidget(self.align_list_card)
+            form_area.addWidget(self.command_card)
+            form_area.setSizes([240, 430])
+            work = QSplitter(Qt.Horizontal)
+            work.setHandleWidth(8)
+            work.addWidget(self.job_stack)
+            work.addWidget(form_area)
+            work.setSizes([330, 470])
+            left = QSplitter(Qt.Vertical)
+            left.setHandleWidth(8)
+            left.addWidget(self.docs_card)
+            left.addWidget(work)
+            left.setSizes([320, 580])
+            rightcol = QSplitter(Qt.Vertical)
+            rightcol.setHandleWidth(8)
+            rightcol.addWidget(self.dir_card)
+            rightcol.addWidget(self.terminal_card)
+            rightcol.addWidget(self.queue_card)
+            rightcol.setSizes([240, 470, 120])
+            main = QSplitter(Qt.Horizontal)
+            main.setHandleWidth(8)
+            main.addWidget(left)
+            main.addWidget(rightcol)
+            main.setSizes([1000, 500])
+
+        self._layout_host_v.addWidget(main)
         if hasattr(self, "_act_canvas"):
             self._act_canvas.setChecked(canvas)
-        if hasattr(self, "_work_split"):
-            self._work_split.setSizes([560, 420] if canvas else [330, 470])
         if canvas:
             self._refresh_canvas()
         self._save_config({**self._load_config(), "view_mode": mode})
+
+    # ---- card "Details" side pane (card view) ----
+    def _build_details_panel(self):
+        self.details_box = QVBoxLayout()
+        self.details_box.setAlignment(Qt.AlignTop)
+        self.details_box.setContentsMargins(12, 8, 18, 8)
+        self.details_box.setSpacing(6)
+        ph = QLabel("Click “Details” on a card to inspect its inputs, outputs "
+                    "and parameters.")
+        ph.setStyleSheet("color:#888;font-size:12px;")
+        ph.setWordWrap(True)
+        self.details_box.addWidget(ph)
+        inner = QWidget()
+        inner.setLayout(self.details_box)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(inner)
+        return scroll
+
+    @staticmethod
+    def _details_heading(text):
+        lab = QLabel(text)
+        lab.setStyleSheet("color:#9ec5ff;font-size:11px;font-weight:700;margin-top:6px;")
+        return lab
+
+    def _open_dir_button(self, label, rel):
+        b = QPushButton(label)
+        b.setStyleSheet("text-align:left;padding:3px 8px;")
+        b.setToolTip(f"Open {rel} in the file manager")
+        b.clicked.connect(lambda _=False, r=rel: self._open_dir(r))
+        return b
+
+    def _show_card_details(self, node):
+        """Populate + reveal the Details pane beside the canvas for a clicked card.
+        Directory access is via lazy 'Open dir' buttons (no enumeration on show —
+        ceph scandir is what has crashed this app before)."""
+        if getattr(self, "_view_mode", "lists") != "canvas":
+            return
+        self._clear_box(self.details_box)
+        stage_id = node.get("stage_id")
+        spec = self._stage_by_id(stage_id)
+
+        title = QLabel(node.get("label", stage_id))
+        title.setStyleSheet("font-size:15px;font-weight:700;color:#ececec;")
+        title.setWordWrap(True)
+        self.details_box.addWidget(title)
+
+        if node.get("is_ghost"):
+            meta = f"{node.get('group', '')} · not built yet"
+        else:
+            meta = f"{node.get('group', '')} · {node.get('status', '')}  ({node.get('id')})"
+        ml = QLabel(meta)
+        ml.setStyleSheet("color:#9a9a9a;font-size:11px;")
+        ml.setWordWrap(True)
+        self.details_box.addWidget(ml)
+
+        st = summary_text(node.get("summary", {}))
+        if st:
+            s = QLabel(st)
+            s.setStyleSheet("color:#cfcfcf;font-size:12px;")
+            s.setWordWrap(True)
+            self.details_box.addWidget(s)
+
+        ins, outs = STAGE_IO.get(stage_id, ([], []))
+        if ins:
+            self.details_box.addWidget(self._details_heading("INPUTS"))
+            for rel in ins:
+                self.details_box.addWidget(self._open_dir_button(f"📂  {rel}", rel))
+        self.details_box.addWidget(self._details_heading("OUTPUTS"))
+        if not node.get("is_ghost") and node.get("id"):
+            outrel = f"jobs/{node['id']}"      # a real job writes into jobs/<id>
+            self.details_box.addWidget(self._open_dir_button(f"📂  {outrel}", outrel))
+        for rel in outs:
+            self.details_box.addWidget(self._open_dir_button(f"📂  {rel}", rel))
+
+        if spec:
+            self.details_box.addWidget(self._details_heading("ACTIONS"))
+            edit = QPushButton("Open in job builder →")
+            edit.setToolTip("Load this stage's parameters into the job builder on the right.")
+            edit.clicked.connect(lambda _=False, s=spec: self._select_stage(s))
+            self.details_box.addWidget(edit)
+
+        self.details_card.setVisible(True)
+        if getattr(self, "_canvas_split", None) is not None:
+            w = max(self._canvas_split.width(), 900)
+            self._canvas_split.setSizes([int(w * 0.55), int(w * 0.45)])
 
     # ---- helpers ----
     @staticmethod
@@ -3970,10 +4153,10 @@ class Tomogration(QMainWindow):
         v.addWidget(scroll, 1)
         return w
 
-    # ---- middle column: Alignment & Reconstruction list over the command form ----
+    # ---- Alignment & Reconstruction list + the command form (built as two
+    # separate cards so the layout can place them independently: together in
+    # list view, command-only beside the canvas in card view) ----
     def _build_align_and_command(self):
-        vs = QSplitter(Qt.Vertical)
-        vs.setHandleWidth(8)
         a_inner = QWidget()
         av = QVBoxLayout(a_inner)
         av.setAlignment(Qt.AlignTop)
@@ -3982,18 +4165,21 @@ class Tomogration(QMainWindow):
         a_scroll = QScrollArea()
         a_scroll.setWidgetResizable(True)
         a_scroll.setWidget(a_inner)
-        vs.addWidget(self._panel("alignCard", "Alignment & Reconstruction", a_scroll))
+        self.align_list_card = self._panel("alignCard", "Alignment & Reconstruction",
+                                           a_scroll)
 
         self.form_box = QVBoxLayout()
         self.form_box.setAlignment(Qt.AlignTop)
+        # Right margin clears the vertical scrollbar so it never overlaps text;
+        # tight spacing keeps rows dense.
+        self.form_box.setContentsMargins(12, 8, 20, 8)
+        self.form_box.setSpacing(3)
         form_inner = QWidget()
         form_inner.setLayout(self.form_box)
         form_scroll = QScrollArea()
         form_scroll.setWidgetResizable(True)
         form_scroll.setWidget(form_inner)
-        vs.addWidget(self._panel("cmdCard", "Command to run", form_scroll))
-        vs.setSizes([240, 430])
-        return vs
+        self.command_card = self._panel("cmdCard", "Job builder", form_scroll)
 
     # ---- one mockup column of stage rows; fills the shared registries ----
     def _build_stage_list(self, column_key):
@@ -4342,9 +4528,16 @@ class Tomogration(QMainWindow):
         self._save_config({**self._load_config(), "param_store": self._param_store})
 
     def _param_row(self, p, controls, default_override=None):
+        # Compact two-line row: [name | control] on top, dim smaller help beneath.
+        # Tight margins so rows don't waste vertical space (the form scrolls).
         default = default_override if default_override is not None else p.get("default")
         row = QHBoxLayout()
-        row.addWidget(QLabel(p["name"]))
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        name = QLabel(p["name"])
+        name.setStyleSheet("color:#d6d6d6;font-size:12px;")
+        name.setMinimumWidth(96)
+        row.addWidget(name)
         kind = p["kind"]
         if kind == "check":
             cb = QCheckBox()
@@ -4352,6 +4545,7 @@ class Tomogration(QMainWindow):
             cb.stateChanged.connect(self._on_control_changed)
             controls[p["name"]] = lambda c=cb: c.isChecked()
             row.addWidget(cb)
+            row.addStretch(1)
         elif kind in ("slider_int", "env_int"):
             # A spin box (type OR step), not a slider — sliders can't hit an exact
             # large value (e.g. MA_POOL_SIZE 2400 jumps 1988→2004). Type it directly.
@@ -4380,14 +4574,18 @@ class Tomogration(QMainWindow):
             e.textChanged.connect(self._on_control_changed)
             controls[p["name"]] = lambda c=e: c.text()
             row.addWidget(e, 1)
-        help_lab = QLabel(p.get("help", ""))
-        help_lab.setStyleSheet("color:#888;font-size:11px;")
-        help_lab.setWordWrap(True)
         outer = QVBoxLayout()
+        outer.setContentsMargins(0, 3, 0, 3)
+        outer.setSpacing(1)
         rw = QWidget()
         rw.setLayout(row)
         outer.addWidget(rw)
-        outer.addWidget(help_lab)
+        help_text = p.get("help", "")
+        if help_text:
+            help_lab = QLabel(help_text)
+            help_lab.setStyleSheet("color:#7c7c7c;font-size:10px;")
+            help_lab.setWordWrap(True)
+            outer.addWidget(help_lab)
         box = QWidget()
         box.setLayout(outer)
         return box

@@ -153,13 +153,15 @@ with tempfile.TemporaryDirectory() as tmp:
     # The full window won't build off-Qt, but the canvas widget alone should
     # construct and render (stub Qt = no-ops) without throwing, for both an
     # empty store and one with jobs, and route a card click to the callback.
-    picked = []
+    picked, detailed = [], []
     try:
-        canvas = app.JobCanvas(lambda: str(root), lambda sid: picked.append(sid))
+        canvas = app.JobCanvas(lambda: str(root), lambda sid: picked.append(sid),
+                               on_details=lambda node: detailed.append(node["stage_id"]))
         canvas.refresh()                     # empty-ish store (has jobs from above)
         app.new_job(root, "aretomo", "AreTomo", {})
         canvas.refresh()                     # with an extra job
         canvas._pick({"stage_id": "ts_ctf"})
+        canvas._details({"stage_id": "ts_reconstruct"})
         canvas_ok = True
     except Exception as e:
         import traceback
@@ -167,6 +169,85 @@ with tempfile.TemporaryDirectory() as tmp:
         canvas_ok = False
     check("JobCanvas constructs + refreshes without throwing", canvas_ok)
     check("card click routes stage_id to callback", picked == ["ts_ctf"])
+    check("Details chip routes node to on_details", detailed == ["ts_reconstruct"])
+
+    # ---- _apply_layout + _show_card_details (Phase 3 layout) ---------------
+    # Exercise the real method bodies with controlled fakes (the stub can't run
+    # a full window: `while layout.count()` never ends on a _Perm). Catches
+    # attribute typos / bad references in the layout + details code.
+    class FakeLayout:
+        def __init__(self):
+            self.widgets = []
+        def count(self):
+            return 0                     # always "empty" so _clear_box exits
+        def takeAt(self, i):
+            return None
+        def addWidget(self, w):
+            self.widgets.append(w)
+    class FakeW:
+        def __init__(self):
+            self.visible = None
+        def setParent(self, p):
+            pass
+        def setVisible(self, v):
+            self.visible = v
+        def setCurrentIndex(self, i):
+            self.idx = i
+        def setChecked(self, b):
+            self.checked = b
+        def width(self):
+            return 1000
+        def setSizes(self, s):
+            self.sizes = s
+
+    class LWin(app.Tomogration):
+        def __init__(self):
+            self._view_mode = "lists"
+            self.job_stack = FakeW()
+            self.details_card = FakeW()
+            self.docs_card = FakeW(); self.align_list_card = FakeW()
+            self.command_card = FakeW(); self.dir_card = FakeW()
+            self.terminal_card = FakeW(); self.queue_card = FakeW()
+            self._panels = [self.job_stack, self.details_card, self.docs_card,
+                            self.align_list_card, self.command_card, self.dir_card,
+                            self.terminal_card, self.queue_card]
+            self._stash = FakeW()
+            self._layout_host_v = FakeLayout()
+            self._act_canvas = FakeW()
+            self._canvas_split = None
+            self.details_box = FakeLayout()
+            self._cfg = {}
+        def _load_config(self):
+            return dict(self._cfg)
+        def _save_config(self, cfg):
+            self._cfg = dict(cfg)
+        def _refresh_canvas(self):
+            pass
+
+    try:
+        lw = LWin()
+        lw._apply_layout("canvas")
+        canvas_mode = (lw._view_mode == "canvas" and lw._cfg.get("view_mode") == "canvas")
+        lw._canvas_split = FakeW()       # _apply_layout set a stub splitter; use a real width()
+        lw._show_card_details({"id": "J01", "stage_id": "ts_reconstruct",
+                               "label": "Reconstruct", "group": "7. Reconstruct",
+                               "is_ghost": False, "status": "completed",
+                               "summary": {"tomograms": 5, "angpix": "10.00"}})
+        details_shown = (lw.details_card.visible is True)
+        lw._show_card_details({"id": "ghost:aretomo", "stage_id": "aretomo",
+                               "label": "AreTomo", "group": "5. Alignment",
+                               "is_ghost": True, "status": "ghost", "summary": {}})
+        lw._apply_layout("lists")
+        back_to_lists = (lw._view_mode == "lists")
+        layout_ok = True
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        layout_ok = canvas_mode = details_shown = back_to_lists = False
+    check("_apply_layout runs both modes without throwing", layout_ok)
+    check("_apply_layout sets + persists canvas mode", canvas_mode)
+    check("_show_card_details reveals the details pane", details_shown)
+    check("_apply_layout toggles back to lists", back_to_lists)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
