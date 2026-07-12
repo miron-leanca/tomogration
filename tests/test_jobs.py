@@ -207,6 +207,28 @@ with tempfile.TemporaryDirectory() as tmp:
           app.summary_text({"tomograms": 290, "angpix": "10.00"}) == "290 tomo · 10.00 Å")
     check("summary_text empty -> ''", app.summary_text({}) == "")
 
+# ---- default_parent_for + delete_job (pure) -------------------------------
+with tempfile.TemporaryDirectory() as tmp:
+    pr = Path(tmp)
+    check("no parent when store empty",
+          app.default_parent_for("ts_reconstruct", app.load_jobs(pr)) is None)
+    c1 = app.new_job(pr, "ts_ctf", "CTF", {})
+    c2 = app.new_job(pr, "ts_ctf", "CTF2", {})
+    # reconstruct's parent = newest upstream WARP job (the ts_ctf just made)
+    check("parent = newest upstream warp job",
+          app.default_parent_for("ts_reconstruct", app.load_jobs(pr)) == c2["id"])
+    # aretomo is a wrapper (not a WarpTools stage) -> skipped as a processing parent
+    app.new_job(pr, "aretomo", "AreTomo", {})
+    check("wrapper stage not chosen as processing parent",
+          app.default_parent_for("ts_reconstruct", app.load_jobs(pr)) == c2["id"])
+    # export sits after reconstruct/threshold; with only ctf jobs, ctf is nearest warp
+    check("nearest upstream warp chosen",
+          app.default_parent_for("ts_export_particles", app.load_jobs(pr)) == c2["id"])
+    check("delete removes the record",
+          app.delete_job(pr, c1["id"]) and c1["id"] not in app.load_jobs(pr)["jobs"])
+    check("delete unknown id -> False", app.delete_job(pr, "J999") is False)
+    check("_jobnum orders", app._jobnum("J12") == 12 and app._jobnum("bad") == 0)
+
 # ---- GPU-list separator normalisation (pure) ------------------------------
 check("norm gpu comma->space", app._norm_gpu("0,1,2,3", " ") == "0 1 2 3")
 check("norm gpu space->comma", app._norm_gpu("0 1 2 3", ",") == "0,1,2,3")

@@ -75,6 +75,15 @@ class Win(app.Tomogration):
     def _dispatch(self, sid, cmd, fresh=True):
         self._dispatched = (sid, cmd, fresh)
 
+    # canvas refresh + form are GUI; stub them for the build/fork tests
+    current = None
+
+    def _refresh_canvas(self):
+        pass
+
+    def _select_stage(self, spec):
+        self._selected = spec["id"]
+
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
@@ -170,6 +179,35 @@ with tempfile.TemporaryDirectory() as tmp:
     check("JobCanvas constructs + refreshes without throwing", canvas_ok)
     check("card click routes stage_id to callback", picked == ["ts_ctf"])
     check("Details chip routes node to on_details", detailed == ["ts_reconstruct"])
+
+    # ---- _build_job / _fork_job (Phase 3 interactivity) -------------------
+    bw = Win(root)
+    # seed an upstream ctf job so the built reconstruct auto-wires to it
+    up = app.new_job(root, "ts_ctf", "CTF", {})
+    job = bw._build_job("ts_reconstruct", params={"angpix": "10"}, run=False)
+    st = app.load_jobs(root)["jobs"][job["id"]]
+    check("_build_job created a queued job", st["status"] == "queued")
+    check("_build_job auto-wired input to upstream ctf",
+          st["inputs"].get("processing") == up["id"])
+    check("_build_job carried params", st["params"].get("angpix") == "10")
+
+    bw2 = Win(root)
+    bw2.runner._busy = False
+    built = bw2._build_job("ts_ctf", params={"window": "1024"}, run=True)
+    check("_build_job with run dispatched via runner", len(bw2.runner.ran) == 1)
+    check("_build_job run marked the job running",
+          app.load_jobs(root)["jobs"][built["id"]]["status"] == "running")
+
+    bw3 = Win(root)
+    fk = bw3._fork_job(job["id"])
+    forks = [j for j in app.load_jobs(root)["jobs"].values()
+             if j["label"].endswith("(fork)")]
+    check("_fork_job created a fork", len(forks) == 1)
+    check("_fork_job copied stage + params",
+          forks[0]["stage_id"] == "ts_reconstruct"
+          and forks[0]["params"].get("angpix") == "10")
+    check("_fork_job opened it in the builder",
+          getattr(bw3, "_selected", None) == "ts_reconstruct")
 
     # ---- _apply_layout + _show_card_details (Phase 3 layout) ---------------
     # Exercise the real method bodies with controlled fakes (the stub can't run

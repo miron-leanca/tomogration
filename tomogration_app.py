@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QInputDialog, QListWidgetItem, QTextBrowser,
     QAbstractScrollArea, QAbstractSpinBox, QSpinBox,
     QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsSimpleTextItem,
+    QMenu,
 )
 
 
@@ -2402,6 +2403,44 @@ def build_job_command(spec, job, store, warp_cmd=None, group_inputs=None):
     return cmd
 
 
+def _jobnum(jid):
+    """Numeric part of a 'J<seq>' id, for newest-first ordering."""
+    try:
+        return int(str(jid).lstrip("J"))
+    except ValueError:
+        return 0
+
+
+def default_parent_for(stage_id, store):
+    """When building a new job for `stage_id`, pick a sensible default input: the
+    newest WarpTools job of the nearest preceding WarpTools stage (only warp
+    stages have a processing dir worth reading via --input_processing). None means
+    'read the project trunk / .settings default', like the three-column view."""
+    order = [s["id"] for s in STAGES]
+    if stage_id not in order:
+        return None
+    jobs = store.get("jobs", {})
+    for up in reversed(order[:order.index(stage_id)]):
+        spec = next((s for s in STAGES if s["id"] == up), None)
+        if not spec or not is_warp_stage(spec):
+            continue
+        cands = [jid for jid, j in jobs.items() if j.get("stage_id") == up]
+        if cands:
+            return max(cands, key=_jobnum)
+    return None
+
+
+def delete_job(root, job_id):
+    """Remove a job record from the store (leaves any jobs/<id>/ dir on disk —
+    outputs are never auto-deleted). Returns True if a record was removed."""
+    store = load_jobs(root)
+    if job_id in store.get("jobs", {}):
+        del store["jobs"][job_id]
+        save_jobs(root, store)
+        return True
+    return False
+
+
 # ---- per-stage result summaries (the one-line card readout) ----------------
 # summarize_job(stage_id, job_abs_dir) -> {label: value}. A card must NEVER
 # enumerate thousands of ceph files on the Qt thread (that crash is why
@@ -3603,6 +3642,10 @@ class _CardItem(QGraphicsRectItem):
         self.setCursor(Qt.PointingHandCursor)
 
     def mousePressEvent(self, ev):
+        if ev.button() == Qt.RightButton:
+            self._canvas._menu(self._node, ev.screenPos())
+            ev.accept()
+            return
         self._canvas._pick(self._node)
         super().mousePressEvent(ev)
 
@@ -3631,11 +3674,13 @@ class _DetailsChip(QGraphicsRectItem):
 
 
 class JobCanvas(QWidget):
-    def __init__(self, root_getter, on_pick, on_details=None, parent=None):
+    def __init__(self, root_getter, on_pick, on_details=None, on_menu=None,
+                 parent=None):
         super().__init__(parent)
         self._root_getter = root_getter      # callable -> project_root str
         self._on_pick = on_pick              # callable(stage_id)
         self._on_details = on_details        # callable(node) | None
+        self._on_menu = on_menu              # callable(node, global_qpoint) | None
         self.scene = QGraphicsScene(self)
         self.view = QGraphicsView(self.scene)
         self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -3717,6 +3762,13 @@ class JobCanvas(QWidget):
         if self._on_details is not None:
             try:
                 self._on_details(node)
+            except Exception:
+                pass
+
+    def _menu(self, node, global_pos):
+        if self._on_menu is not None:
+            try:
+                self._on_menu(node, global_pos)
             except Exception:
                 pass
 
@@ -3811,7 +3863,8 @@ class Tomogration(QMainWindow):
         self.job_stack.addWidget(
             self._panel("listsCard", "Pipeline jobs", self._build_job_lists()))
         self.canvas = JobCanvas(lambda: self.project_root, self._canvas_pick,
-                                on_details=self._show_card_details)
+                                on_details=self._show_card_details,
+                                on_menu=self._card_menu)
         self.job_stack.addWidget(
             self._panel("canvasCard", "Workflow graph", self.canvas))
         self._build_align_and_command()   # sets self.align_list_card + self.command_card
@@ -4039,6 +4092,20 @@ class Tomogration(QMainWindow):
 
         if spec:
             self.details_box.addWidget(self._details_heading("ACTIONS"))
+            if node.get("is_ghost"):
+                build = QPushButton("▶ Build & run job")
+                build.setToolTip("Create a job instance for this stage (input auto-wired "
+                                 "to the newest upstream job) and run it.")
+                build.clicked.connect(lambda _=False, sid=stage_id: self._build_job(sid))
+                self.details_box.addWidget(build)
+            else:
+                jid = node.get("id")
+                run = QPushButton("▶ Run / re-run")
+                run.clicked.connect(lambda _=False, j=jid: self._run_job(j))
+                self.details_box.addWidget(run)
+                fork = QPushButton("⑂ Duplicate (fork)")
+                fork.clicked.connect(lambda _=False, j=jid: self._fork_job(j))
+                self.details_box.addWidget(fork)
             edit = QPushButton("Open in job builder →")
             edit.setToolTip("Load this stage's parameters into the job builder on the right.")
             edit.clicked.connect(lambda _=False, s=spec: self._select_stage(s))
@@ -4048,6 +4115,85 @@ class Tomogration(QMainWindow):
         if getattr(self, "_canvas_split", None) is not None:
             w = max(self._canvas_split.width(), 900)
             self._canvas_split.setSizes([int(w * 0.55), int(w * 0.45)])
+
+    # ---- card actions (Phase 3): build / fork / run / delete ----
+    def _effective_params(self, spec):
+        """Template defaults overlaid with the user's persisted per-stage edits —
+        the values a fresh job of this stage should start from."""
+        vals = stage_defaults(spec)
+        vals.update(self._param_store.get(spec["id"], {}))
+        return vals
+
+    def _card_menu(self, node, global_pos):
+        """Right-click menu on a canvas card."""
+        menu = QMenu(self)
+        sid = node.get("stage_id")
+        if node.get("is_ghost"):
+            menu.addAction("Build & run job", lambda: self._build_job(sid, run=True))
+            menu.addAction("Build (don't run)", lambda: self._build_job(sid, run=False))
+            menu.addAction("Open in job builder", lambda: self._canvas_pick(sid))
+        else:
+            jid = node.get("id")
+            menu.addAction("Run / re-run", lambda: self._run_job(jid))
+            menu.addAction("Duplicate (fork)", lambda: self._fork_job(jid))
+            menu.addAction("Details", lambda: self._show_card_details(node))
+            menu.addAction("Open in job builder", lambda: self._canvas_pick(sid))
+            menu.addSeparator()
+            menu.addAction("Delete job", lambda: self._delete_job(jid))
+        menu.exec(global_pos)
+
+    def _build_job(self, stage_id, params=None, run=True, parent=None):
+        """Create a job instance for a stage (auto-wiring its input to the newest
+        upstream WarpTools job) and optionally run it."""
+        spec = self._stage_by_id(stage_id)
+        if not spec:
+            return None
+        store = load_jobs(self.project_root)
+        if params is None:
+            # prefer the live form if this stage is the one on screen
+            if self.current and self.current.get("spec", {}).get("id") == stage_id:
+                params = self._values()
+            else:
+                params = self._effective_params(spec)
+        if parent is None:
+            parent = default_parent_for(stage_id, store)
+        inputs = {"processing": parent} if parent else {}
+        job = new_job(self.project_root, stage_id, spec.get("label", stage_id),
+                      params, inputs)
+        self._log(f"Built {job['id']} · {job['label']}"
+                  + (f"  (input ← {parent})" if parent else "  (input ← trunk)"), "ok")
+        self._refresh_canvas()
+        if run:
+            self._run_job(job["id"])
+        return job
+
+    def _fork_job(self, job_id):
+        """Duplicate a job (same stage, params and input wiring) as a new queued
+        job, and open it in the builder so its params can be tweaked before Run."""
+        store = load_jobs(self.project_root)
+        src = store.get("jobs", {}).get(job_id)
+        if not src:
+            return
+        job = new_job(self.project_root, src["stage_id"],
+                      src.get("label", src["stage_id"]) + " (fork)",
+                      src.get("params", {}), src.get("inputs", {}))
+        self._log(f"Forked {job_id} → {job['id']}. Edit params in the job builder, "
+                  f"then right-click → Run.", "ok")
+        self._refresh_canvas()
+        spec = self._stage_by_id(src["stage_id"])
+        if spec:
+            self._select_stage(spec)
+
+    def _delete_job(self, job_id):
+        if QMessageBox.question(
+                self, "Delete job?",
+                f"Remove job {job_id} from the workflow?\n\n"
+                f"Its output folder (jobs/{job_id}/) is left on disk — delete that "
+                f"by hand if you want the space back.") != QMessageBox.Yes:
+            return
+        if delete_job(self.project_root, job_id):
+            self._log(f"Deleted job {job_id}.", "info")
+            self._refresh_canvas()
 
     # ---- helpers ----
     @staticmethod
@@ -4489,12 +4635,16 @@ class Tomogration(QMainWindow):
 
         btns = QHBoxLayout()
         run = QPushButton("▶ Run")
+        build_job = QPushButton("▶ Build & run as job")
+        build_job.setToolTip("Card view: create a job instance on the canvas from these "
+                             "parameters (input auto-wired to the newest upstream job) "
+                             "and run it. Fork a finished job to try variants.")
         rebuild = QPushButton("↻ Rebuild from controls")
         enqueue = QPushButton("+ Queue variant")
         reset = QPushButton("⟲ Reset defaults")
         reset.setToolTip("Discard your saved edits for THIS step and restore the "
                          "template defaults (and current dynamic defaults).")
-        for b in (run, rebuild, enqueue, reset):
+        for b in (run, build_job, rebuild, enqueue, reset):
             btns.addWidget(b)
         if spec.get("sync_helper"):
             fill = QPushButton("Fill: deselect all unaligned")
@@ -4509,6 +4659,7 @@ class Tomogration(QMainWindow):
 
         cmd.textChanged.connect(self._on_cmd_edited)
         run.clicked.connect(self._run_current)
+        build_job.clicked.connect(lambda: self._build_job(spec["id"], run=True))
         rebuild.clicked.connect(lambda: self._set_manual(False))
         enqueue.clicked.connect(self._enqueue_current)
         reset.clicked.connect(lambda: self._reset_stage_defaults(spec["id"]))
@@ -4943,6 +5094,7 @@ class Tomogration(QMainWindow):
         self._attempt = 1
         self._failed_file = None
         self._log(f"--- running {job_id} · {spec['label']} ---", "info")
+        self._refresh_canvas()          # flip the card to 'running' immediately
         self.runner.run(cmd, self.project_root)
 
     def _finalize_job(self, code):
