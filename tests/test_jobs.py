@@ -207,6 +207,29 @@ with tempfile.TemporaryDirectory() as tmp:
           app.summary_text({"tomograms": 290, "angpix": "10.00"}) == "290 tomo · 10.00 Å")
     check("summary_text empty -> ''", app.summary_text({}) == "")
 
+# ---- ts_template_match new params + validate ------------------------------
+tm = next(s for s in app.STAGES if s["id"] == "ts_template_match")
+v = app.stage_defaults(tm)
+v["template_emdb"] = "70905"; v["optimize_poses"] = True; v["output_suffix"] = "run2"
+cmd = app.build_command(tm, v)
+check("template_match emits --template_emdb", "--template_emdb 70905" in cmd)
+check("template_match emits --optimize_poses", "--optimize_poses" in cmd)
+check("template_match emits --output_suffix", "--output_suffix run2" in cmd)
+check("template blank -> no template flags",
+      "--template_emdb" not in app.build_command(tm, app.stage_defaults(tm)))
+check("validate warns when neither template set", bool(tm["validate"](app.stage_defaults(tm))))
+check("validate ok when exactly one set", tm["validate"](v) == "")
+vboth = app.stage_defaults(tm); vboth["template_emdb"] = "70905"; vboth["template_path"] = "/x.mrc"
+check("validate warns when both set", bool(tm["validate"](vboth)))
+
+# ---- DIR_FILE_HINTS covers every STAGE_IO input/output dir -----------------
+io_dirs = set()
+for ins, outs in app.STAGE_IO.values():
+    io_dirs.update(ins); io_dirs.update(outs)
+io_dirs.discard("aretomo_output")   # dynamic versioned name, hinted separately
+missing = [d for d in io_dirs if d not in app.DIR_FILE_HINTS]
+check(f"every STAGE_IO dir has a file-pattern hint (missing: {missing})", not missing)
+
 # ---- default_parent_for + delete_job (pure) -------------------------------
 with tempfile.TemporaryDirectory() as tmp:
     pr = Path(tmp)

@@ -1752,15 +1752,31 @@ STAGES = [
              "--angpix you have ALREADY run — matching reuses that full tomogram "
              "(warp_tiltseries/reconstruction/<pos>_<angpix>Apx.mrc). Mismatch → "
              "'A reconstruction at the desired resolution was not found'. 8-12 typical."},
+            {"name": "template_emdb", "kind": "text", "flag": "--template_emdb",
+             "default": "", "help": "EMDB code to fetch + use as the template, e.g. 70905. "
+             "Set EITHER this OR template_path (not both)."},
+            {"name": "template_path", "kind": "text", "flag": "--template_path",
+             "default": "", "help": "Path to a local template .mrc. Set EITHER this OR "
+             "template_emdb (not both)."},
+            {"name": "output_suffix", "kind": "text", "flag": "--output_suffix",
+             "default": "", "help": "Suffix that names THIS pick set's output star files "
+             "(…_<suffix>.star in warp_tiltseries/matching/). Use a different suffix per run "
+             "to keep parallel pick sets side by side — threshold_picks/export then choose "
+             "which set via its --in_suffix (this is how you fork picking). Blank = Warp's "
+             "default name from the template. VERIFY the flag name with ts_template_match "
+             "--help if it errors."},
             {"name": "subdivisions", "kind": "slider_int", "flag": "--subdivisions",
              "default": 3, "min": 1, "max": 6, "step": 1,
-             "help": "Angular subdivisions of the search."},
+             "help": "Angular subdivisions of the search (finer = more orientations, slower)."},
             {"name": "template_diameter", "kind": "text", "flag": "--template_diameter",
              "default": "", "help": "Particle diameter (Å)."},
             {"name": "symmetry", "kind": "text", "flag": "--symmetry",
              "default": "C1", "help": "Point group, e.g. O, D2, C1."},
             {"name": "whiten", "kind": "check", "flag": "--whiten",
              "default": True, "help": "Spectral whitening; helps with good alignments."},
+            {"name": "optimize_poses", "kind": "check", "flag": "--optimize_poses",
+             "default": False, "help": "Locally refine each hit's orientation/position after "
+             "the coarse search (better picks, a bit slower). ON in the reference workflow."},
             {"name": "check_hand", "kind": "slider_int", "flag": "--check_hand",
              "default": 2, "min": 0, "max": 2, "step": 1,
              "help": "2 = verify geometry/handedness during matching."},
@@ -1772,6 +1788,10 @@ STAGES = [
              "default": 1, "min": 1, "max": 4, "step": 1,
              "help": "Worker processes per GPU (raise only on big-memory cards)."},
         ],
+        "validate": lambda v: (
+            "⚠ Set EXACTLY ONE of template_emdb / template_path — matching needs a template."
+            if bool(str(v.get("template_emdb", "")).strip())
+            == bool(str(v.get("template_path", "")).strip()) else ""),
         "docs": {
             "what": "CTF-aware template matching to locate particles "
                     "(apoferritin example values — adapt per target).",
@@ -2232,6 +2252,26 @@ STAGE_IO = {
     "ts_export_particles":  (["warp_tiltseries", "warp_tiltseries/matching"], ["relion4/warp"]),
     "relion4_convert":      (["relion4/warp"], ["relion4/warp"]),
     "relion4_class3d":      (["relion4/warp"], ["relion4/warp"]),
+}
+
+# Generic filename patterns each key directory is searched for — shown in the
+# Job details INPUTS/OUTPUTS lists so the user knows WHICH files a step consumes
+# or produces in each folder (not just the folder name). Keyed by the same rel
+# dirs used in STAGE_IO.
+DIR_FILE_HINTS = {
+    "frames": "*.eer  (raw movies)",
+    "mdocs": "*.mdoc  (per-series)",
+    "gains": "*.gain / gain reference",
+    "Thumbnails": "*.mrc  (per-series montage)",
+    "warp_frameseries": "*.xml  (per-movie metadata)",
+    "tomostar": "*.tomostar  (per-series)",
+    "warp_tiltseries": "*.xml  (per-series metadata)",
+    "warp_tiltseries/tiltstack": "*.st + *.rawtlt  (aligned stacks)",
+    "aretomo_output": "Imod/*.xf  (alignments)",
+    "warp_tiltseries/reconstruction": "*_<angpix>Apx.mrc  (tomograms)",
+    "warp_tiltseries/matching": "*_<suffix>.star  (pick lists)",
+    "relion4/warp": "*.star + subtomo/*.mrc",
+    ".": "(project root)",
 }
 
 # Stages whose output dir should be ARCHIVED (renamed aside, timestamped) instead
@@ -4047,6 +4087,15 @@ class Tomogration(QMainWindow):
         b.clicked.connect(lambda _=False, r=rel: self._open_dir(r))
         return b
 
+    def _add_pattern_hint(self, verb, pattern):
+        """Dim 'searches: *.tomostar' line under a dir button (skips if unknown)."""
+        if not pattern:
+            return
+        lab = QLabel(f"      {verb}:  {pattern}")
+        lab.setStyleSheet("color:#7c7c7c;font-size:10px;")
+        lab.setWordWrap(True)
+        self.details_box.addWidget(lab)
+
     def _show_card_details(self, node):
         """Populate + reveal the Details pane beside the canvas for a clicked card.
         Directory access is via lazy 'Open dir' buttons (no enumeration on show —
@@ -4083,12 +4132,16 @@ class Tomogration(QMainWindow):
             self.details_box.addWidget(self._details_heading("INPUTS"))
             for rel in ins:
                 self.details_box.addWidget(self._open_dir_button(f"📂  {rel}", rel))
+                self._add_pattern_hint("searches", DIR_FILE_HINTS.get(rel))
         self.details_box.addWidget(self._details_heading("OUTPUTS"))
         if not node.get("is_ghost") and node.get("id"):
-            outrel = f"jobs/{node['id']}"      # a real job writes into jobs/<id>
+            outrel = f"jobs/{node['id']}"      # a real job writes into its own jobs/<id>
             self.details_box.addWidget(self._open_dir_button(f"📂  {outrel}", outrel))
-        for rel in outs:
-            self.details_box.addWidget(self._open_dir_button(f"📂  {rel}", rel))
+            self._add_pattern_hint("writes", DIR_FILE_HINTS.get(outs[0]) if outs else None)
+        else:
+            for rel in outs:
+                self.details_box.addWidget(self._open_dir_button(f"📂  {rel}", rel))
+                self._add_pattern_hint("writes", DIR_FILE_HINTS.get(rel))
 
         if spec:
             self.details_box.addWidget(self._details_heading("ACTIONS"))
