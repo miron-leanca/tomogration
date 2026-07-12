@@ -18,18 +18,24 @@ pick_python() {
 }
 
 # No-root xcb fix: if fetch_xcb_libs.sh unpacked libs into ./libs, expose them
-# so Qt's xcb plugin can find libxcb-cursor without a system install.
-if [ -d "$SCRIPT_DIR/libs" ]; then
-    for d in "$SCRIPT_DIR"/libs/usr/lib/*/ "$SCRIPT_DIR"/libs/usr/lib/; do
-        [ -d "$d" ] && LD_LIBRARY_PATH="$d:${LD_LIBRARY_PATH}"
-    done
-    export LD_LIBRARY_PATH
-fi
+# so Qt's xcb plugin can find libxcb-cursor without a system install. This MUST
+# run AFTER the self-heal below — on a first run install.sh fetches ./libs as
+# part of setup, so setting LD_LIBRARY_PATH before that would miss it (and the
+# xcb plugin then fails to load: "libxcb-cursor0 is needed").
+add_local_libs() {
+    if [ -d "$SCRIPT_DIR/libs" ]; then
+        for d in "$SCRIPT_DIR"/libs/usr/lib/*/ "$SCRIPT_DIR"/libs/usr/lib/; do
+            [ -d "$d" ] && LD_LIBRARY_PATH="$d:${LD_LIBRARY_PATH}"
+        done
+        export LD_LIBRARY_PATH
+    fi
+}
 
 PYTHON="$(pick_python)"
 
 # Self-heal: no working PySide6 on this machine -> run the one-time setup, which
-# (re)builds the venv and installs PySide6, then re-pick the interpreter.
+# (re)builds the venv, installs PySide6, and fetches ./libs, then re-pick the
+# interpreter.
 if ! "$PYTHON" -c "import PySide6" >/dev/null 2>&1; then
     echo "Tomogration: first-time setup on this machine (building the Python"
     echo "environment; the first run downloads PySide6, ~100 MB)…"
@@ -46,4 +52,5 @@ if ! "$PYTHON" -c "import PySide6" >/dev/null 2>&1; then
     exit 1
 fi
 
+add_local_libs      # after setup, so a first run picks up the freshly-fetched ./libs
 exec "$PYTHON" "$SCRIPT_DIR/tomogration_app.py" "$@"
