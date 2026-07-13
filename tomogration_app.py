@@ -5396,16 +5396,21 @@ class Tomogration(QMainWindow):
             star_pat = f"*Apx{orph.get('suffix', '')}.star"
             corr_suffix = ""                 # template unknown from a star name alone
         else:
+            job = None
             if not node.get("is_ghost") and node.get("id"):
-                params = ((load_jobs(self.project_root).get("jobs", {})
-                           .get(node["id"], {}) or {}).get("params", {}))
+                job = load_jobs(self.project_root).get("jobs", {}).get(node["id"])
+            if job:
+                params = job.get("params", {})
+                # a job's picks live in ITS OWN dir, not the (often archived) trunk
+                mdir = f"{job.get('output_dir', 'warp_tiltseries')}/matching"
             elif self.current and self.current.get("spec", {}).get("id") == stage_id:
                 params = self._values()
+                mdir = "warp_tiltseries/matching"
             else:
                 spec = self._stage_by_id(stage_id) or {}
                 params = self._effective_params(spec) if spec else {}
+                mdir = "warp_tiltseries/matching"
             apx = fmt_angpix(params.get("tomo_angpix", "12.56"))
-            mdir = "warp_tiltseries/matching"
             # STAR uses the run's suffix (override or template); the CORR volume
             # always uses the template suffix (--override_suffix doesn't rename it).
             star_pat = f"*{apx}Apx{template_match_suffix(params)}.star"
@@ -5415,10 +5420,19 @@ class Tomogration(QMainWindow):
         # *_emd_70905_corr.mrc) — one corr per tomogram when there's one template.
         corr_pat = (f"*{apx}Apx{corr_suffix}_corr.mrc" if corr_suffix
                     else f"*{apx}Apx*_corr.mrc")
+        # If this dir has no corr volumes (e.g. a whitened run, or an adopted set),
+        # view picks-only — warp-tm-vis errors otherwise. Bounded: one dir, first hit.
+        no_vol = ""
+        try:
+            mp = Path(self.project_root) / mdir
+            if mp.is_dir() and next(mp.glob("*_corr.mrc"), None) is None:
+                no_vol = " --no-load-volumes"
+        except OSError:
+            pass
         cmd = (f'{self.tm_vis_launch} '
                f'-rdir warp_tiltseries/reconstruction '
                f'-mdir {mdir} '
-               f'-mp "{star_pat}" -cvp "{corr_pat}"')
+               f'-mp "{star_pat}" -cvp "{corr_pat}"{no_vol}')
         cmd, ok = QInputDialog.getText(
             self, "Launch warp-tm-vis",
             "Command (edit the suffix / paths if needed; add --no-load-volumes if "
