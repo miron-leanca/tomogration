@@ -93,11 +93,21 @@ def main():
     lo, hi = (float(np.percentile(vol, 2)), float(np.percentile(vol, 98)))
     viewer = napari.Viewer(title=f"{args.tomogram.split('/')[-1]}  ·  {len(pts)} picks")
     viewer.add_image(vol, name="tomogram", colormap="gray", contrast_limits=[lo, hi])
-    kw = dict(name="picks", size=max(6, int(150 / angpix)), symbol="ring",
-              opacity=0.8, border_color="red", face_color="red")
-    if score is not None and score.size == len(pts):
-        kw.update(face_color=score, face_colormap="viridis", border_color="white")
-    viewer.add_points(pts, **kw)
+    size = max(6, int(150 / angpix))
+    outline = "white" if score is not None else "red"
+    face = score if (score is not None and score.size == len(pts)) else "red"
+    fmap = "viridis" if not isinstance(face, str) else None
+    # napari renamed edge_color -> border_color in 0.5; support both.
+    for edge_kw in ("border_color", "edge_color"):
+        try:
+            kw = {"name": "picks", "size": size, "symbol": "ring", "opacity": 0.8,
+                  "face_color": face, edge_kw: outline}
+            if fmap:
+                kw["face_colormap"] = fmap
+            viewer.add_points(pts, **kw)
+            break
+        except TypeError:
+            continue
     print(f"{len(pts)} picks over {args.tomogram} ({nx}x{ny}x{nz} px @ {angpix} A/px)")
     napari.run()
 
