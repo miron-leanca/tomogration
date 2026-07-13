@@ -2026,8 +2026,10 @@ STAGES = [
             {"name": "NCLASSES", "kind": "env_int", "flag": "NCLASSES",
              "default": 4, "min": 1, "max": 12, "step": 1, "help": "Number of 3D classes (K)."},
             {"name": "GPUS", "kind": "env", "flag": "GPUS", "gpu_sep": ",",
-             "default": "0,1,2,3", "help": "GPU ids for RELION, comma- or space-separated "
-             "(idle ones — check util%). MPI is set to (#GPUs + 1) automatically."},
+             "default": "0,1,2,3", "help": "GPU ids for RELION (idle ones — check util%). "
+             "Any separator; the script converts to RELION's colon form (0:1:2:3) so each "
+             "MPI follower gets its OWN GPU — a space/comma list makes RELION pile all "
+             "followers onto GPU 0. MPI is set to (#GPUs + 1) automatically."},
             {"name": "execute", "kind": "check", "flag": "--execute",
              "default": False, "help": "OFF = dry run (prints the plan + relion command, "
              "runs nothing). Turn ON to actually submit Class3D."},

@@ -30,7 +30,9 @@
 #   DIAMETER        particle diameter (Å) for the mask   (REQUIRED)
 #   SYMMETRY        point group for classification       (default: C1 — symmetrise at Refine3D)
 #   NCLASSES        number of 3D classes (K)             (default: 4)
-#   GPUS            comma list of GPU ids                (default: 0,1,2,3; MPI = n+1)
+#   GPUS            GPU ids, any separator                (default: 0,1,2,3; MPI = n+1;
+#                   space/comma/colon all accepted -> RELION gets the colon form
+#                   0:1:2:3 so each MPI follower uses its OWN GPU, not all on GPU 0)
 #   ITER            classification iterations            (default: 25)
 #   INI_LOWPASS     initial reference low-pass (Å)       (default: 45)
 #   RELION_EXTRA    appended verbatim to relion_refine_mpi
@@ -109,11 +111,18 @@ echo "-------------------------------------------------------------------"
 echo "Reference prep (rescale $REF_ANGPIX -> $OUTPUT_ANGPIX Å/px, box $BOX):"
 echo "  ${IMG_HANDLER[*]}"
 
-# ---- 3. MPI sizing -----------------------------------------------------------
-n_gpu=$(printf '%s' "$GPUS" | tr ',' '\n' | grep -c '[0-9]')
-[ "$n_gpu" -ge 1 ] || n_gpu=1
-MPI=$((n_gpu + 1))
+# ---- 3. MPI sizing + GPU assignment ------------------------------------------
+# RELION assigns ONE GPU per MPI follower via a COLON-separated --gpu list
+# (0:1:2:3). A space/comma list (0 1 2 3 / 0,1,2,3) makes every follower pile
+# onto the first device — the classic "RELION only uses 1 GPU" trap. Accept any
+# separator here, count the ids, and emit the colon form.
+GPU_IDS=$(printf '%s' "$GPUS" | tr ',: ' '\n\n\n' | grep -E '^[0-9]+$')
+n_gpu=$(printf '%s\n' "$GPU_IDS" | grep -c '[0-9]')
+if [ "$n_gpu" -lt 1 ]; then n_gpu=1; GPU_IDS=0; fi
+GPU_ARG=$(printf '%s\n' "$GPU_IDS" | tr '\n' ':' | sed 's/:*$//')   # -> 0:1:2:3
+MPI=$((n_gpu + 1))                                   # 1 non-GPU leader + n followers
 OUT="$PROJECT_DIR/Class3D/job001/run"
+echo "GPU assignment: --gpu $GPU_ARG   (MPI $MPI = $n_gpu GPU followers + 1 leader)"
 
 # ---- 4. the Class3D command --------------------------------------------------
 # NOTE: relion_refine_mpi is launched FROM the project dir; paths below are relative.
@@ -129,7 +138,7 @@ REFINE=(mpirun -n "$MPI" relion_refine_mpi
         --particle_diameter "$DIAMETER"
         --oversampling 1 --healpix_order 2 --offset_range 5 --offset_step 2
         --dont_combine_weights_via_disc --pool 3 --j 4
-        --gpu "$GPUS"
+        --gpu "$GPU_ARG"
         $RELION_EXTRA)
 echo "-------------------------------------------------------------------"
 echo "Class3D (MPI $MPI = $n_gpu GPU + 1 leader), run FROM $PROJECT_DIR:"
