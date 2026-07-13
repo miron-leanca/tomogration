@@ -2549,6 +2549,42 @@ def template_match_suffix(params):
     return ov if ov else template_corr_suffix(params)
 
 
+def match_star_infix(params):
+    """threshold_picks --in_suffix = the WHOLE middle of a template-match star name,
+    '<tomo_angpix>Apx<suffix>' (e.g. 12.56Apx_v3-optimized) — because WarpTools looks
+    for {item}_{in_suffix}.star. NOT just the override suffix (that's the recurring
+    'No files found matching PositionNNN_<suffix>.star.star' trap)."""
+    return f"{fmt_angpix(params.get('tomo_angpix', ''))}Apx{template_match_suffix(params)}"
+
+
+# Valid next stages for "Build downstream" from a job card (the DAG's forward
+# edges among the forkable back-half stages).
+DOWNSTREAM = {
+    "ts_ctf": ["ts_reconstruct"],
+    "ts_reconstruct": ["ts_template_match"],
+    "ts_template_match": ["threshold_picks", "ts_export_particles"],
+    "threshold_picks": ["ts_export_particles"],
+    "ts_export_particles": ["relion4_convert"],
+    "relion4_convert": ["relion4_class3d"],
+}
+
+
+def derive_child_params(child_stage, parent_stage, parent_params):
+    """Params a downstream job should inherit from its chosen parent, so wiring
+    'J5 -> threshold_picks' auto-fills the fiddly suffix/pattern instead of the user
+    reverse-engineering it."""
+    if child_stage == "threshold_picks" and parent_stage == "ts_template_match":
+        return {"in_suffix": match_star_infix(parent_params)}
+    if child_stage == "ts_export_particles":
+        if parent_stage == "threshold_picks":
+            infix = parent_params.get("in_suffix", "")
+            out = parent_params.get("out_suffix", "clean")
+            return {"input_pattern": f"*{infix}_{out}.star"}
+        if parent_stage == "ts_template_match":
+            return {"input_pattern": f"*{match_star_infix(parent_params)}.star"}
+    return {}
+
+
 # ---- per-stage result summaries (the one-line card readout) ----------------
 # summarize_job(stage_id, job_abs_dir) -> {label: value}. A card must NEVER
 # enumerate thousands of ceph files on the Qt thread (that crash is why
@@ -4055,6 +4091,7 @@ class Tomogration(QMainWindow):
         self._active_stage = None
         self._active_cmd = ""
         self._active_job_id = None    # set while a card-view job (not a stage) runs
+        self._pending_parent = {}     # stage_id -> chosen parent job for the next build
         self._failed_file = None
         self._attempt = 1
         self._max_retries = 20
@@ -4400,6 +4437,12 @@ class Tomogration(QMainWindow):
                 run = QPushButton("▶ Run / re-run")
                 run.clicked.connect(lambda _=False, j=jid: self._run_job(j))
                 self.details_box.addWidget(run)
+                for ch in DOWNSTREAM.get(stage_id, []):
+                    b = QPushButton(f"→ Build {stage_title(ch, ch)} from this")
+                    b.setToolTip("Create the next job wired to THIS job, with the suffix / "
+                                 "pattern auto-derived — then set your threshold and run.")
+                    b.clicked.connect(lambda _=False, j=jid, c=ch: self._build_downstream(j, c))
+                    self.details_box.addWidget(b)
                 fork = QPushButton("⑂ Duplicate (fork)")
                 fork.clicked.connect(lambda _=False, j=jid: self._fork_job(j))
                 self.details_box.addWidget(fork)
@@ -4514,6 +4557,12 @@ class Tomogration(QMainWindow):
         else:
             jid = node.get("id")
             menu.addAction("Run / re-run", lambda: self._run_job(jid))
+            children = DOWNSTREAM.get(sid, [])
+            if children:
+                sub = menu.addMenu("Build downstream from this")
+                for ch in children:
+                    sub.addAction(stage_title(ch, ch),
+                                  lambda _=False, c=ch: self._build_downstream(jid, c))
             menu.addAction("Duplicate (fork)", lambda: self._fork_job(jid))
             menu.addAction("Details", lambda: self._show_card_details(node))
             menu.addAction("Open in job builder", lambda: self._canvas_pick(sid))
@@ -4535,7 +4584,9 @@ class Tomogration(QMainWindow):
             else:
                 params = self._effective_params(spec)
         if parent is None:
-            parent = default_parent_for(stage_id, store)
+            # a parent explicitly chosen via "Build downstream" wins over the
+            # newest-upstream default
+            parent = self._pending_parent.pop(stage_id, None) or default_parent_for(stage_id, store)
         inputs = {"processing": parent} if parent else {}
         job = new_job(self.project_root, stage_id, spec.get("label", stage_id),
                       params, inputs)
@@ -4545,6 +4596,28 @@ class Tomogration(QMainWindow):
         if run:
             self._run_job(job["id"])
         return job
+
+    def _build_downstream(self, parent_id, child_stage_id):
+        """Set up the next stage wired to a SPECIFIC parent job: derive the fiddly
+        bits (threshold's in_suffix, export's input_pattern) from the parent, seed
+        the job builder so they're pre-filled + editable, and remember the parent so
+        the next 'Build & run as job' wires to it (not just the newest upstream).
+        This is the 'rope J5's output into threshold_picks' shortcut."""
+        store = load_jobs(self.project_root)
+        parent = store.get("jobs", {}).get(parent_id)
+        spec = self._stage_by_id(child_stage_id)
+        if not parent or not spec:
+            return
+        derived = derive_child_params(child_stage_id, parent.get("stage_id"),
+                                      parent.get("params", {}))
+        self._param_store.setdefault(child_stage_id, {}).update(derived)
+        self._persist_param_store()
+        self._pending_parent[child_stage_id] = parent_id
+        self._select_stage(spec)          # form shows the derived values, editable
+        hint = f" in_suffix={derived['in_suffix']}" if "in_suffix" in derived else \
+               (f" input_pattern={derived['input_pattern']}" if "input_pattern" in derived else "")
+        self._log(f"Set up {stage_title(child_stage_id, child_stage_id)} from "
+                  f"{parent_id}.{hint}  Adjust, then ▶ Build & run as job.", "ok")
 
     def _fork_job(self, job_id):
         """Duplicate a job (same stage, params and input wiring) as a new queued

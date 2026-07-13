@@ -345,5 +345,31 @@ with tempfile.TemporaryDirectory() as tmp:
     check("canvas_layout without orphans still works",
           app.canvas_layout(app.load_jobs(root)) is not None)
 
+# ---- downstream wiring: derive child params from a parent job (pure) -------
+# the WHOLE middle is the threshold in_suffix, not just the override suffix
+check("match_star_infix full middle",
+      app.match_star_infix({"tomo_angpix": "12.56", "override_suffix": "_v3-optimized"})
+      == "12.56Apx_v3-optimized")
+check("match_star_infix from template",
+      app.match_star_infix({"tomo_angpix": "10", "template_emdb": "70905"})
+      == "10.00Apx_emd_70905")
+check("threshold inherits in_suffix from template match",
+      app.derive_child_params("threshold_picks", "ts_template_match",
+                              {"tomo_angpix": "12.56", "override_suffix": "_v3-optimized"})
+      == {"in_suffix": "12.56Apx_v3-optimized"})
+check("export inherits pattern from threshold",
+      app.derive_child_params("ts_export_particles", "threshold_picks",
+                              {"in_suffix": "12.56Apx_v3-optimized", "out_suffix": "clean"})
+      == {"input_pattern": "*12.56Apx_v3-optimized_clean.star"})
+check("export inherits pattern from template match",
+      app.derive_child_params("ts_export_particles", "ts_template_match",
+                              {"tomo_angpix": "12.56", "override_suffix": "_v3-optimized"})
+      == {"input_pattern": "*12.56Apx_v3-optimized.star"})
+check("no derivation for unrelated pair",
+      app.derive_child_params("ts_reconstruct", "ts_ctf", {}) == {})
+check("DOWNSTREAM edges present",
+      "threshold_picks" in app.DOWNSTREAM["ts_template_match"]
+      and "ts_export_particles" in app.DOWNSTREAM["threshold_picks"])
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

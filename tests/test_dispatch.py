@@ -56,6 +56,7 @@ class Win(app.Tomogration):
         self.runner = FakeRunner()
         self.queue = []
         self._active_job_id = None
+        self._pending_parent = {}
         self._active_stage = "SENTINEL_STAGE"
         self._active_cmd = ""
         self._attempt = 1
@@ -77,12 +78,19 @@ class Win(app.Tomogration):
 
     # canvas refresh + form are GUI; stub them for the build/fork tests
     current = None
+    _param_store = None
 
     def _refresh_canvas(self):
         pass
 
     def _select_stage(self, spec):
         self._selected = spec["id"]
+
+    def _persist_param_store(self):
+        pass
+
+    def _effective_params(self, spec):
+        return app.stage_defaults(spec)
 
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -208,6 +216,31 @@ with tempfile.TemporaryDirectory() as tmp:
           and forks[0]["params"].get("angpix") == "10")
     check("_fork_job opened it in the builder",
           getattr(bw3, "_selected", None) == "ts_reconstruct")
+
+    # ---- _build_downstream: thread a SPECIFIC parent into the next stage --
+    dw = Win(root)
+    dw._param_store = {}
+    dw._pending_parent = {}
+    # two template-match jobs; downstream should wire to the CHOSEN one, not newest
+    old_tm = app.new_job(root, "ts_template_match", "M old",
+                         {"tomo_angpix": "12.56", "override_suffix": "_v1"})
+    new_tm = app.new_job(root, "ts_template_match", "M new",
+                         {"tomo_angpix": "12.56", "override_suffix": "_v3-optimized"})
+    dw._build_downstream(old_tm["id"], "threshold_picks")   # deliberately the OLDER
+    check("downstream seeds derived in_suffix into the form store",
+          dw._param_store["threshold_picks"]["in_suffix"] == "12.56Apx_v1")
+    check("downstream remembers the chosen parent",
+          dw._pending_parent.get("threshold_picks") == old_tm["id"])
+    check("downstream opened the child in the builder", dw._selected == "threshold_picks")
+    # now the build should wire to the CHOSEN old_tm, overriding newest-upstream
+    dw.runner._busy = False
+    thr = dw._build_job("threshold_picks",
+                        params={"in_suffix": "12.56Apx_v1", "minimum": 3}, run=False)
+    st = app.load_jobs(root)["jobs"][thr["id"]]
+    check("threshold wired to the chosen parent (not newest)",
+          st["inputs"].get("processing") == old_tm["id"])
+    check("pending parent consumed after build",
+          "threshold_picks" not in dw._pending_parent)
 
     # ---- _adopt_orphan: register an on-disk pick set as a job -------------
     aw = Win(root)
