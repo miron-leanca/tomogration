@@ -2575,19 +2575,23 @@ DOWNSTREAM = {
 }
 
 
-def derive_child_params(child_stage, parent_stage, parent_params):
+def derive_child_params(child_stage, parent_stage, parent_params, parent_output_dir=""):
     """Params a downstream job should inherit from its chosen parent, so wiring
-    'J5 -> threshold_picks' auto-fills the fiddly suffix/pattern instead of the user
-    reverse-engineering it."""
+    'J5 -> threshold_picks -> export' auto-fills the fiddly suffix/pattern/dir
+    instead of the user reverse-engineering it. ts_export_particles reads the pick
+    STARs from --input_directory (NOT --input_processing), so it must point at the
+    parent job's own matching dir where those STARs actually live."""
     if child_stage == "threshold_picks" and parent_stage == "ts_template_match":
         return {"in_suffix": match_star_infix(parent_params)}
     if child_stage == "ts_export_particles":
+        mdir = f"{parent_output_dir}/matching" if parent_output_dir else "warp_tiltseries/matching"
         if parent_stage == "threshold_picks":
             infix = parent_params.get("in_suffix", "")
             out = parent_params.get("out_suffix", "clean")
-            return {"input_pattern": f"*{infix}_{out}.star"}
+            return {"input_directory": mdir, "input_pattern": f"*{infix}_{out}.star"}
         if parent_stage == "ts_template_match":
-            return {"input_pattern": f"*{match_star_infix(parent_params)}.star"}
+            return {"input_directory": mdir,
+                    "input_pattern": f"*{match_star_infix(parent_params)}.star"}
     return {}
 
 
@@ -4615,7 +4619,8 @@ class Tomogration(QMainWindow):
         if not parent or not spec:
             return
         derived = derive_child_params(child_stage_id, parent.get("stage_id"),
-                                      parent.get("params", {}))
+                                      parent.get("params", {}),
+                                      parent.get("output_dir", ""))
         self._param_store.setdefault(child_stage_id, {}).update(derived)
         self._persist_param_store()
         self._pending_parent[child_stage_id] = parent_id

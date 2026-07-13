@@ -363,14 +363,22 @@ check("threshold inherits in_suffix from template match",
       app.derive_child_params("threshold_picks", "ts_template_match",
                               {"tomo_angpix": "12.56", "override_suffix": "_v3-optimized"})
       == {"in_suffix": "12.56Apx_v3-optimized"})
-check("export inherits pattern from threshold",
+check("export inherits pattern + dir from threshold",
       app.derive_child_params("ts_export_particles", "threshold_picks",
-                              {"in_suffix": "12.56Apx_v3-optimized", "out_suffix": "clean"})
-      == {"input_pattern": "*12.56Apx_v3-optimized_clean.star"})
-check("export inherits pattern from template match",
+                              {"in_suffix": "12.56Apx_v3-optimized", "out_suffix": "clean"},
+                              "jobs/J8")
+      == {"input_directory": "jobs/J8/matching",
+          "input_pattern": "*12.56Apx_v3-optimized_clean.star"})
+check("export inherits pattern + dir from template match",
       app.derive_child_params("ts_export_particles", "ts_template_match",
-                              {"tomo_angpix": "12.56", "override_suffix": "_v3-optimized"})
-      == {"input_pattern": "*12.56Apx_v3-optimized.star"})
+                              {"tomo_angpix": "12.56", "override_suffix": "_v3-optimized"},
+                              "jobs/J5")
+      == {"input_directory": "jobs/J5/matching",
+          "input_pattern": "*12.56Apx_v3-optimized.star"})
+check("export dir falls back to trunk without a parent dir",
+      app.derive_child_params("ts_export_particles", "threshold_picks",
+                              {"in_suffix": "x", "out_suffix": "clean"})
+      .get("input_directory") == "warp_tiltseries/matching")
 check("no derivation for unrelated pair",
       app.derive_child_params("ts_reconstruct", "ts_ctf", {}) == {})
 check("DOWNSTREAM edges present",
