@@ -2521,13 +2521,11 @@ def fmt_angpix(a):
         return str(a)
 
 
-def template_match_suffix(params):
-    """The STAR suffix a ts_template_match run writes: an explicit --override_suffix
-    if set (used verbatim, leading underscore and all), else Warp's template-derived
-    name (_emd_<code> for an EMDB template, _<stem> for a local template)."""
-    ov = str(params.get("override_suffix", "") or "").strip()
-    if ov:
-        return ov
+def template_corr_suffix(params):
+    """Suffix on the CORRELATION VOLUME (_corr.mrc) + score maps: ALWAYS the
+    template-derived name (_emd_<code> / _<stem>). The corr volume is the
+    template×tomogram cross-correlation, so --override_suffix does NOT rename it —
+    only the peak-list STAR. (Confirmed on disk: v2 stars alongside _emd_70905_corr.mrc.)"""
     emdb = str(params.get("template_emdb", "") or "").strip()
     if emdb:
         return f"_emd_{emdb}"
@@ -2535,6 +2533,14 @@ def template_match_suffix(params):
     if tp:
         return "_" + os.path.splitext(os.path.basename(tp))[0]
     return ""
+
+
+def template_match_suffix(params):
+    """The STAR suffix a ts_template_match run writes: an explicit --override_suffix
+    if set (used verbatim, leading underscore and all), else the template-derived
+    name (same as the corr volume)."""
+    ov = str(params.get("override_suffix", "") or "").strip()
+    return ov if ov else template_corr_suffix(params)
 
 
 # ---- per-stage result summaries (the one-line card readout) ----------------
@@ -5067,12 +5073,14 @@ class Tomogration(QMainWindow):
             spec = self._stage_by_id(stage_id) or {}
             params = self._effective_params(spec) if spec else {}
         apx = fmt_angpix(params.get("tomo_angpix", "12.56"))
-        suffix = template_match_suffix(params)
-        pat = f"*{apx}Apx{suffix}"                 # e.g. *12.56Apx_emd_70905
+        # STAR uses the run's suffix (override or template); the CORR volume always
+        # uses the template suffix (--override_suffix doesn't rename it).
+        star_pat = f"*{apx}Apx{template_match_suffix(params)}.star"
+        corr_pat = f"*{apx}Apx{template_corr_suffix(params)}_corr.mrc"
         cmd = (f'{self.tm_vis_launch} '
                f'-rdir warp_tiltseries/reconstruction '
                f'-mdir warp_tiltseries/matching '
-               f'-mp "{pat}.star" -cvp "{pat}_corr.mrc"')
+               f'-mp "{star_pat}" -cvp "{corr_pat}"')
         cmd, ok = QInputDialog.getText(
             self, "Launch warp-tm-vis",
             "Command (edit the suffix / paths if needed; add --no-load-volumes if "

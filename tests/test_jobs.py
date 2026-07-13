@@ -167,12 +167,17 @@ with tempfile.TemporaryDirectory() as tmp:
 check("stage_title friendly", app.stage_title("ts_reconstruct") == "Tomogram reconstruction")
 check("stage_title fallback", app.stage_title("unknown_x", "raw") == "raw")
 check("fmt_angpix 2dp", app.fmt_angpix("10") == "10.00" and app.fmt_angpix("12.56") == "12.56")
-check("suffix uses override verbatim",
-      app.template_match_suffix({"override_suffix": "_v3", "template_emdb": "70905"}) == "_v3")
-check("suffix from emdb", app.template_match_suffix({"template_emdb": "70905"}) == "_emd_70905")
-check("suffix from path stem",
+check("star suffix uses override verbatim",
+      app.template_match_suffix({"override_suffix": "260712v2", "template_emdb": "70905"}) == "260712v2")
+check("star suffix from emdb", app.template_match_suffix({"template_emdb": "70905"}) == "_emd_70905")
+check("star suffix from path stem",
       app.template_match_suffix({"template_path": "/a/b/ribo.mrc"}) == "_ribo")
-check("suffix none when nothing set", app.template_match_suffix({}) == "")
+check("star suffix none when nothing set", app.template_match_suffix({}) == "")
+# the CORR volume keeps the TEMPLATE suffix even when override_suffix renames the star
+check("corr suffix ignores override",
+      app.template_corr_suffix({"override_suffix": "260712v2", "template_emdb": "70905"}) == "_emd_70905")
+check("corr suffix from path stem",
+      app.template_corr_suffix({"template_path": "/a/b/ribo.mrc"}) == "_ribo")
 check("every stage has a friendly title",
       all(s["id"] in app.FRIENDLY_TITLES for s in app.STAGES))
 
