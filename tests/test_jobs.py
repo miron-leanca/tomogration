@@ -163,6 +163,19 @@ with tempfile.TemporaryDirectory() as tmp:
     check("reconstruct empty when no reconstruction/ dir",
           app.summarize_job("ts_reconstruct", cd) == {})
 
+# ---- friendly titles + napari path helpers (pure) -------------------------
+check("stage_title friendly", app.stage_title("ts_reconstruct") == "Tomogram reconstruction")
+check("stage_title fallback", app.stage_title("unknown_x", "raw") == "raw")
+check("fmt_angpix 2dp", app.fmt_angpix("10") == "10.00" and app.fmt_angpix("12.56") == "12.56")
+check("suffix uses override verbatim",
+      app.template_match_suffix({"override_suffix": "_v3", "template_emdb": "70905"}) == "_v3")
+check("suffix from emdb", app.template_match_suffix({"template_emdb": "70905"}) == "_emd_70905")
+check("suffix from path stem",
+      app.template_match_suffix({"template_path": "/a/b/ribo.mrc"}) == "_ribo")
+check("suffix none when nothing set", app.template_match_suffix({}) == "")
+check("every stage has a friendly title",
+      all(s["id"] in app.FRIENDLY_TITLES for s in app.STAGES))
+
 # ---- canvas layout (Phase 2, pure) ----------------------------------------
 with tempfile.TemporaryDirectory() as tmp:
     croot = Path(tmp)

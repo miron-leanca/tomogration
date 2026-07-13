@@ -2512,6 +2512,31 @@ def delete_job(root, job_id):
     return False
 
 
+def fmt_angpix(a):
+    """Warp names reconstructions/matches with a 2-decimal pixel size, e.g. '10' ->
+    '10.00', '12.56' -> '12.56' (Position042_12.56Apx.mrc)."""
+    try:
+        return f"{float(a):.2f}"
+    except (TypeError, ValueError):
+        return str(a)
+
+
+def template_match_suffix(params):
+    """The STAR suffix a ts_template_match run writes: an explicit --override_suffix
+    if set (used verbatim, leading underscore and all), else Warp's template-derived
+    name (_emd_<code> for an EMDB template, _<stem> for a local template)."""
+    ov = str(params.get("override_suffix", "") or "").strip()
+    if ov:
+        return ov
+    emdb = str(params.get("template_emdb", "") or "").strip()
+    if emdb:
+        return f"_emd_{emdb}"
+    tp = str(params.get("template_path", "") or "").strip()
+    if tp:
+        return "_" + os.path.splitext(os.path.basename(tp))[0]
+    return ""
+
+
 # ---- per-stage result summaries (the one-line card readout) ----------------
 # summarize_job(stage_id, job_abs_dir) -> {label: value}. A card must NEVER
 # enumerate thousands of ceph files on the Qt thread (that crash is why
@@ -2648,6 +2673,28 @@ def summary_text(summary):
     return " · ".join(parts)
 
 
+# Human-readable card titles (the STAGES 'label' is the raw command name, which
+# reads like jargon on a card). Falls back to the label for anything unlisted.
+FRIENDLY_TITLES = {
+    "rename": "Rename EER + MDOC", "imod_warp_key": "IMOD → Warp key",
+    "inspect_select": "Inspect tilt stacks", "remake_mdocs": "Remake MDOCs",
+    "gain_convert": "Gain: convert", "gain_reciprocal": "Gain: reciprocal",
+    "create_settings_fs": "Frameseries settings", "fs_motion_and_ctf": "Motion + CTF",
+    "create_settings_ts": "Tilt-series settings", "ts_import": "Import tilt series",
+    "ts_stack": "Build tilt stacks", "aretomo": "Align (AreTomo2)",
+    "miss_align": "Refine alignment (train)", "miss_align_infer": "Refine alignment (infer)",
+    "ts_import_alignments": "Import alignments", "sync_selection": "Sync selection",
+    "ts_defocus_hand": "Defocus handedness", "ts_ctf": "CTF estimation",
+    "ts_reconstruct": "Tomogram reconstruction", "ts_template_match": "Template matching",
+    "threshold_picks": "Threshold picks", "ts_export_particles": "Export particles",
+    "relion4_convert": "RELION 4: convert STAR", "relion4_class3d": "RELION 4: Class3D",
+}
+
+
+def stage_title(stage_id, fallback=""):
+    return FRIENDLY_TITLES.get(stage_id, fallback or stage_id)
+
+
 def canvas_layout(store):
     """Positioned workflow graph for the canvas. Returns (nodes, edges).
 
@@ -2668,11 +2715,12 @@ def canvas_layout(store):
     for row, spec in enumerate(STAGES):
         sid = spec["id"]
         y = row * (CARD_H + GAP_Y)
+        title = stage_title(sid, spec.get("label", sid))
         js = by_stage.get(sid, [])
         if not js:
             nid = f"ghost:{sid}"
             n = {"id": nid, "stage_id": sid, "label": spec.get("label", sid),
-                 "group": spec.get("group", ""), "row": row, "col": 0,
+                 "title": title, "group": spec.get("group", ""), "row": row, "col": 0,
                  "x": 0, "y": y, "w": CARD_W, "h": CARD_H,
                  "is_ghost": True, "status": "ghost", "summary": {}}
             nodes.append(n)
@@ -2680,8 +2728,10 @@ def canvas_layout(store):
             row_first[sid] = nid
         else:
             for col, (jid, job) in enumerate(js):
+                fork = "(fork)" in str(job.get("label", ""))
                 n = {"id": jid, "stage_id": sid,
                      "label": job.get("label", spec.get("label", sid)),
+                     "title": title + (" (fork)" if fork else ""),
                      "group": spec.get("group", ""), "row": row, "col": col,
                      "x": col * (CARD_W + GAP_X), "y": y,
                      "w": CARD_W, "h": CARD_H, "is_ghost": False,
@@ -3806,17 +3856,19 @@ class JobCanvas(QWidget):
             t.setPos(x, y)
             return t
 
-        # group tag (tiny) · title (bold) · status/summary · J### badge
-        text(n.get("group", ""), 11, 7, 8, "#6f6f6f")
-        text(n["label"], 11, 22, 11, "#8a8a8a" if ghost else "#ececec", bold=True)
+        # group tag (tiny) · friendly title (bold) · raw command · status/summary
+        text(n.get("group", ""), 11, 6, 8, "#6f6f6f")
+        text(n.get("title", n["label"]), 11, 20, 11,
+             "#8a8a8a" if ghost else "#ececec", bold=True)
+        text(n["stage_id"], 11, 40, 8, "#6f6f6f")     # raw command, for power users
         if ghost:
             sub = "not built"
         else:
             st = summary_text(n["summary"])
             sub = n["status"] + (f" · {st}" if st else "")
-        text(sub[:34], 11, 46, 9, "#7d7d7d")
+        text(sub[:36], 11, 56, 9, "#7d7d7d")
         if not ghost:
-            text(n["id"], n["w"] - 42, 7, 8, "#9ec5ff")
+            text(n["id"], n["w"] - 42, 6, 8, "#9ec5ff")
 
         # Details chip (only if the canvas has a details handler)
         if self._on_details is not None:
@@ -3865,7 +3917,10 @@ class Tomogration(QMainWindow):
         # Persisted per-stage parameter edits: {stage_id: {param_name: value}}. A user's
         # edits stick (across stage switches AND restarts) until they change them again,
         # hit "Reset defaults", or a dynamic default (e.g. a newer AreTomo version) wins.
-        self._param_store = self._load_config().get("param_store", {})
+        # Per-stage param edits live in the PROJECT dir (on ceph, shared) not
+        # ~/.tomogration.json ($HOME is local per VM), so edits follow the dataset
+        # across machines. Falls back to the old global config once for migration.
+        self._param_store = self._load_param_store()
         # Migration: the export 3D/2D choice used to emit "" for 3D (so --3d was
         # missing and had to be typed by hand). Any persisted "" is rewritten to
         # the real flag so the fix takes even on machines with an old stored value.
@@ -3891,6 +3946,11 @@ class Tomogration(QMainWindow):
         # the GPU worker resolves them (the from-source shared build does not).
         self.warp_launch = self._load_config().get(
             "warp_launch", "module load miniconda/latest && conda activate warp && WarpTools")
+        # How to launch the napari pick-viewer (napari + mrcfile + starfile must be
+        # importable in that env). Configurable via Tools; the ' python' is where
+        # ml_napari_picks_warp_auto.py + its args are appended.
+        self.napari_launch = self._load_config().get(
+            "napari_launch", "module load miniconda/latest && conda activate warp && python")
 
         self._last_was_progress = False     # terminal progress-line collapsing
 
@@ -3990,6 +4050,7 @@ class Tomogration(QMainWindow):
         tools.addAction("ChimeraX…", self._launch_chimerax)
         tools.addSeparator()
         tools.addAction("Set WarpTools launch command…", self._set_warp_launch)
+        tools.addAction("Set napari launch command…", self._set_napari_launch)
         view = mb.addMenu("View")
         self._act_canvas = view.addAction("Card (graph) view", self._toggle_view)
         self._act_canvas.setCheckable(True)
@@ -4102,6 +4163,7 @@ class Tomogration(QMainWindow):
         inner.setLayout(self.details_box)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(inner)
         return scroll
 
@@ -4137,15 +4199,15 @@ class Tomogration(QMainWindow):
         stage_id = node.get("stage_id")
         spec = self._stage_by_id(stage_id)
 
-        title = QLabel(node.get("label", stage_id))
+        title = QLabel(node.get("title", node.get("label", stage_id)))
         title.setStyleSheet("font-size:15px;font-weight:700;color:#ececec;")
         title.setWordWrap(True)
         self.details_box.addWidget(title)
 
         if node.get("is_ghost"):
-            meta = f"{node.get('group', '')} · not built yet"
+            meta = f"{node.get('group', '')} · {stage_id} · not built yet"
         else:
-            meta = f"{node.get('group', '')} · {node.get('status', '')}  ({node.get('id')})"
+            meta = f"{node.get('group', '')} · {stage_id} · {node.get('status', '')}  ({node.get('id')})"
         ml = QLabel(meta)
         ml.setStyleSheet("color:#9a9a9a;font-size:11px;")
         ml.setWordWrap(True)
@@ -4194,6 +4256,12 @@ class Tomogration(QMainWindow):
             edit.setToolTip("Load this stage's parameters into the job builder on the right.")
             edit.clicked.connect(lambda _=False, s=spec: self._select_stage(s))
             self.details_box.addWidget(edit)
+            if stage_id in ("ts_template_match", "threshold_picks"):
+                nap = QPushButton("🔍 View picks in napari")
+                nap.setToolTip("Overlay this pick set on a series' tomogram in napari "
+                               "(pick the series; edit the command if the suffix/paths differ).")
+                nap.clicked.connect(lambda _=False, n=node: self._view_picks_napari(n))
+                self.details_box.addWidget(nap)
 
         self.details_card.setVisible(True)
         if getattr(self, "_canvas_split", None) is not None:
@@ -4408,6 +4476,9 @@ class Tomogration(QMainWindow):
         form_inner.setLayout(self.form_box)
         form_scroll = QScrollArea()
         form_scroll.setWidgetResizable(True)
+        # Never scroll horizontally — force content to the viewport width so the
+        # command box + help labels WRAP instead of extending off to the right.
+        form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         form_scroll.setWidget(form_inner)
         self.command_card = self._panel("cmdCard", "Job builder", form_scroll)
 
@@ -4712,9 +4783,13 @@ class Tomogration(QMainWindow):
         self.form_box.addWidget(warn)
 
         cmd = QPlainTextEdit()
-        cmd.setFixedHeight(80)
+        cmd.setFixedHeight(96)
+        cmd.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)   # wrap, don't scroll
+        cmd.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         cmd.setStyleSheet(f"font-family:{MONO};font-size:12px;")
-        self.form_box.addWidget(QLabel("Command (editable — this is what runs):"))
+        cmd_lbl = QLabel("Command (editable — this is what runs):")
+        cmd_lbl.setWordWrap(True)
+        self.form_box.addWidget(cmd_lbl)
         self.form_box.addWidget(cmd)
 
         btns = QHBoxLayout()
@@ -4759,8 +4834,28 @@ class Tomogration(QMainWindow):
         if spec:
             self._select_stage(spec)
 
+    def _params_path(self):
+        return Path(self.project_root) / ".tomogration_params.json"
+
+    def _load_param_store(self):
+        """Per-stage param edits, from the project dir (shared across VMs via ceph).
+        Migrates once from the old per-VM ~/.tomogration.json 'param_store' key."""
+        p = self._params_path()
+        if p.is_file():
+            try:
+                d = json.loads(p.read_text())
+                if isinstance(d, dict):
+                    return d
+            except (OSError, ValueError):
+                pass
+        legacy = self._load_config().get("param_store")
+        return dict(legacy) if isinstance(legacy, dict) else {}
+
     def _persist_param_store(self):
-        self._save_config({**self._load_config(), "param_store": self._param_store})
+        try:
+            self._params_path().write_text(json.dumps(self._param_store, indent=1))
+        except OSError as e:
+            self._log(f"Could not save parameters: {e}", "fail")
 
     def _param_row(self, p, controls, default_override=None):
         # Compact two-line row: [name | control] on top, dim smaller help beneath.
@@ -4939,6 +5034,61 @@ class Tomogration(QMainWindow):
             if self.current and self.current.get("cmd") is not None \
                     and not self.current["manual"]:
                 self._rebuild_cmd()
+
+    def _set_napari_launch(self):
+        text, ok = QInputDialog.getText(
+            self, "napari launch command",
+            "Command that runs python with napari + mrcfile + starfile importable "
+            "(the pick-viewer script and its args are appended):",
+            text=self.napari_launch)
+        if ok and text.strip():
+            self.napari_launch = text.strip()
+            cfg = self._load_config()
+            cfg["napari_launch"] = self.napari_launch
+            self._save_config(cfg)
+            self._log(f"napari launch set to: {self.napari_launch}", "ok")
+
+    def _view_picks_napari(self, node):
+        """Open a series' tomogram + its template-match picks in napari. Builds a
+        best-guess command from the job/stage params, then shows it editable so the
+        user can fix the series/suffix/paths (e.g. point at a jobs/<id>/ dir)."""
+        stage_id = node.get("stage_id")
+        if not node.get("is_ghost") and node.get("id"):
+            job = (load_jobs(self.project_root).get("jobs", {}).get(node["id"], {}) or {})
+            params = job.get("params", {})
+        elif self.current and self.current.get("spec", {}).get("id") == stage_id:
+            params = self._values()
+        else:
+            spec = self._stage_by_id(stage_id) or {}
+            params = self._effective_params(spec) if spec else {}
+        apx = fmt_angpix(params.get("tomo_angpix", "12.56"))
+        suffix = template_match_suffix(params)
+
+        tdir = self.project.root / "tomostar"
+        series_list = sorted(p.stem for p in tdir.glob("*.tomostar")) if tdir.is_dir() else []
+        default_series = series_list[0] if series_list else "Position001"
+        series, ok = QInputDialog.getText(
+            self, "View picks in napari",
+            "Tilt series to view (its tomogram + picks are overlaid):",
+            text=default_series)
+        if not ok or not series.strip():
+            return
+        series = series.strip()
+
+        tomo = f"warp_tiltseries/reconstruction/{series}_{apx}Apx.mrc"
+        star = f"warp_tiltseries/matching/{series}_{apx}Apx{suffix}.star"
+        script = _pkg_script("ml_napari_picks_warp_auto.py")
+        cmd = f"{self.napari_launch} {script} {tomo} {star} --angpix {apx}"
+        cmd, ok = QInputDialog.getText(
+            self, "Launch napari",
+            "Command (edit the series / suffix / paths if needed):", text=cmd)
+        if not ok or not cmd.strip():
+            return
+        try:
+            subprocess.Popen(["bash", "-lc", cmd.strip()], cwd=str(self.project_root))
+            self._log(f"napari: {cmd.strip()}", "info")
+        except OSError as e:
+            self._log(f"Could not launch napari: {e}", "fail")
 
     def _rebuild_cmd(self):
         self.current["guard"] = True
@@ -5438,7 +5588,10 @@ class Tomogration(QMainWindow):
         self._groups = self.project.load_groups()
         self._refresh_group_inputs()
         self._update_group_label()
+        # Param edits are per-project (shared across VMs) — reload for the new root.
+        self._param_store = self._load_param_store()
         self._refresh_status_dots()
+        self._refresh_canvas()
         if self.current:                      # refresh dynamic defaults (e.g. AreTomo vN)
             self._select_stage(self.current["spec"])
         self._log(f"Project root -> {new_root}", "ok")

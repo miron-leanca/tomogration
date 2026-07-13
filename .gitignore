@@ -1,8 +1,5 @@
-# Runtime / per-user state
-.tomogration.json
-.tomogration_groups.json
-.tomogration_history.json
-.tomogration_jobs.json
+# Runtime / per-user + per-project state
+.tomogration*.json
 
 # Local install artefacts (built by install.sh / fetch_xcb_libs.sh on each VM)
 .venv/
