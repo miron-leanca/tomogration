@@ -3946,11 +3946,14 @@ class Tomogration(QMainWindow):
         # the GPU worker resolves them (the from-source shared build does not).
         self.warp_launch = self._load_config().get(
             "warp_launch", "module load miniconda/latest && conda activate warp && WarpTools")
-        # How to launch the napari pick-viewer (napari + mrcfile + starfile must be
-        # importable in that env). Configurable via Tools; the ' python' is where
-        # ml_napari_picks_warp_auto.py + its args are appended.
-        self.napari_launch = self._load_config().get(
-            "napari_launch", "module load miniconda/latest && conda activate warp && python")
+        # How to launch warp-tm-vis (github.com/warpem/warp-tm-vis), the pick
+        # viewer: it overlays template-match picks + correlation volumes on the
+        # tomograms. It lives in its OWN conda env (NOT the warp env; not the same
+        # as `uvx`, which is only on some VMs). Conda envs are on ceph (shared), so
+        # `conda activate tmvis && warp-tm-vis` works from any VM. Configurable via
+        # Tools if the env is named differently or you prefer `uvx warp-tm-vis`.
+        self.tm_vis_launch = self._load_config().get(
+            "tm_vis_launch", "module load miniconda/latest && conda activate tmvis && warp-tm-vis")
 
         self._last_was_progress = False     # terminal progress-line collapsing
 
@@ -4050,7 +4053,7 @@ class Tomogration(QMainWindow):
         tools.addAction("ChimeraX…", self._launch_chimerax)
         tools.addSeparator()
         tools.addAction("Set WarpTools launch command…", self._set_warp_launch)
-        tools.addAction("Set napari launch command…", self._set_napari_launch)
+        tools.addAction("Set warp-tm-vis launch command…", self._set_tm_vis_launch)
         view = mb.addMenu("View")
         self._act_canvas = view.addAction("Card (graph) view", self._toggle_view)
         self._act_canvas.setCheckable(True)
@@ -4257,10 +4260,11 @@ class Tomogration(QMainWindow):
             edit.clicked.connect(lambda _=False, s=spec: self._select_stage(s))
             self.details_box.addWidget(edit)
             if stage_id in ("ts_template_match", "threshold_picks"):
-                nap = QPushButton("🔍 View picks in napari")
-                nap.setToolTip("Overlay this pick set on a series' tomogram in napari "
-                               "(pick the series; edit the command if the suffix/paths differ).")
-                nap.clicked.connect(lambda _=False, n=node: self._view_picks_napari(n))
+                nap = QPushButton("🔍 View picks (warp-tm-vis)")
+                nap.setToolTip("Open this pick set in warp-tm-vis — overlays the picks + "
+                               "correlation volumes on the tomograms (edit the command if "
+                               "the suffix/paths differ).")
+                nap.clicked.connect(lambda _=False, n=node: self._view_picks_tm_vis(n))
                 self.details_box.addWidget(nap)
 
         self.details_card.setVisible(True)
@@ -5035,27 +5039,28 @@ class Tomogration(QMainWindow):
                     and not self.current["manual"]:
                 self._rebuild_cmd()
 
-    def _set_napari_launch(self):
+    def _set_tm_vis_launch(self):
         text, ok = QInputDialog.getText(
-            self, "napari launch command",
-            "Command that runs python with napari + mrcfile + starfile importable "
-            "(the pick-viewer script and its args are appended):",
-            text=self.napari_launch)
+            self, "warp-tm-vis launch command",
+            "How to launch warp-tm-vis (its -rdir/-mdir/-mp/-cvp args are appended) "
+            "— e.g. 'uvx warp-tm-vis', a bare 'warp-tm-vis', or a full path:",
+            text=self.tm_vis_launch)
         if ok and text.strip():
-            self.napari_launch = text.strip()
+            self.tm_vis_launch = text.strip()
             cfg = self._load_config()
-            cfg["napari_launch"] = self.napari_launch
+            cfg["tm_vis_launch"] = self.tm_vis_launch
             self._save_config(cfg)
-            self._log(f"napari launch set to: {self.napari_launch}", "ok")
+            self._log(f"warp-tm-vis launch set to: {self.tm_vis_launch}", "ok")
 
-    def _view_picks_napari(self, node):
-        """Open a series' tomogram + its template-match picks in napari. Builds a
-        best-guess command from the job/stage params, then shows it editable so the
-        user can fix the series/suffix/paths (e.g. point at a jobs/<id>/ dir)."""
+    def _view_picks_tm_vis(self, node):
+        """Launch warp-tm-vis (github.com/warpem/warp-tm-vis) on this pick set: it
+        overlays the template-match picks + correlation volumes on the tomograms.
+        Patterns are scoped to this run's suffix; shown editable before launch so
+        the paths/suffix (or a jobs/<id>/ dir) can be adjusted."""
         stage_id = node.get("stage_id")
         if not node.get("is_ghost") and node.get("id"):
-            job = (load_jobs(self.project_root).get("jobs", {}).get(node["id"], {}) or {})
-            params = job.get("params", {})
+            params = ((load_jobs(self.project_root).get("jobs", {})
+                       .get(node["id"], {}) or {}).get("params", {}))
         elif self.current and self.current.get("spec", {}).get("id") == stage_id:
             params = self._values()
         else:
@@ -5063,32 +5068,22 @@ class Tomogration(QMainWindow):
             params = self._effective_params(spec) if spec else {}
         apx = fmt_angpix(params.get("tomo_angpix", "12.56"))
         suffix = template_match_suffix(params)
-
-        tdir = self.project.root / "tomostar"
-        series_list = sorted(p.stem for p in tdir.glob("*.tomostar")) if tdir.is_dir() else []
-        default_series = series_list[0] if series_list else "Position001"
-        series, ok = QInputDialog.getText(
-            self, "View picks in napari",
-            "Tilt series to view (its tomogram + picks are overlaid):",
-            text=default_series)
-        if not ok or not series.strip():
-            return
-        series = series.strip()
-
-        tomo = f"warp_tiltseries/reconstruction/{series}_{apx}Apx.mrc"
-        star = f"warp_tiltseries/matching/{series}_{apx}Apx{suffix}.star"
-        script = _pkg_script("ml_napari_picks_warp_auto.py")
-        cmd = f"{self.napari_launch} {script} {tomo} {star} --angpix {apx}"
+        pat = f"*{apx}Apx{suffix}"                 # e.g. *12.56Apx_emd_70905
+        cmd = (f'{self.tm_vis_launch} '
+               f'-rdir warp_tiltseries/reconstruction '
+               f'-mdir warp_tiltseries/matching '
+               f'-mp "{pat}.star" -cvp "{pat}_corr.mrc"')
         cmd, ok = QInputDialog.getText(
-            self, "Launch napari",
-            "Command (edit the series / suffix / paths if needed):", text=cmd)
+            self, "Launch warp-tm-vis",
+            "Command (edit the suffix / paths if needed; add --no-load-volumes if "
+            "this run didn't save _corr.mrc volumes):", text=cmd)
         if not ok or not cmd.strip():
             return
         try:
             subprocess.Popen(["bash", "-lc", cmd.strip()], cwd=str(self.project_root))
-            self._log(f"napari: {cmd.strip()}", "info")
+            self._log(f"warp-tm-vis: {cmd.strip()}", "info")
         except OSError as e:
-            self._log(f"Could not launch napari: {e}", "fail")
+            self._log(f"Could not launch warp-tm-vis: {e}", "fail")
 
     def _rebuild_cmd(self):
         self.current["guard"] = True
