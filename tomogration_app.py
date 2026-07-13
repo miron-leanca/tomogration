@@ -3871,6 +3871,33 @@ class _DetailsChip(QGraphicsRectItem):
         ev.accept()
 
 
+class _CanvasView(QGraphicsView):
+    """QGraphicsView for the workflow graph (wide, with forks). Adds horizontal
+    navigation that survives remote desktops: trackpad horizontal swipes and
+    Shift+wheel scroll left/right; click-dragging empty canvas pans (clicks on
+    cards still select, since a drag only starts where there's no item)."""
+    def wheelEvent(self, ev):
+        d = ev.angleDelta()
+        horiz = d.x()
+        if horiz == 0 and (ev.modifiers() & Qt.ShiftModifier):
+            horiz = d.y()
+        if horiz:
+            bar = self.horizontalScrollBar()
+            bar.setValue(bar.value() - horiz)
+            ev.accept()
+        else:
+            super().wheelEvent(ev)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self.itemAt(ev.pos()) is None:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        super().mousePressEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        super().mouseReleaseEvent(ev)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+
+
 class JobCanvas(QWidget):
     def __init__(self, root_getter, on_pick, on_details=None, on_menu=None,
                  on_orphans=None, parent=None):
@@ -3881,7 +3908,7 @@ class JobCanvas(QWidget):
         self._on_menu = on_menu              # callable(node, global_qpoint) | None
         self._on_orphans = on_orphans        # callable() -> [orphan descriptor] | None
         self.scene = QGraphicsScene(self)
-        self.view = QGraphicsView(self.scene)
+        self.view = _CanvasView(self.scene)
         self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.view.setBackgroundBrush(QColor("#0e0e0e"))
         lay = QVBoxLayout(self)
@@ -5256,12 +5283,11 @@ class Tomogration(QMainWindow):
         stage_id = node.get("stage_id")
         orph = node.get("orphan")
         if orph:
-            # found-on-disk set: point at its (possibly .bak) dir; corr suffix is
-            # unknown from the star name alone, so use a loose *_corr.mrc (editable).
+            # found-on-disk set: point at its (possibly .bak) dir.
             apx = fmt_angpix(orph.get("angpix", "12.56"))
             mdir = orph.get("dir", "warp_tiltseries/matching")
             star_pat = f"*Apx{orph.get('suffix', '')}.star"
-            corr_pat = "*_corr.mrc"
+            corr_suffix = ""                 # template unknown from a star name alone
         else:
             if not node.get("is_ghost") and node.get("id"):
                 params = ((load_jobs(self.project_root).get("jobs", {})
@@ -5276,7 +5302,12 @@ class Tomogration(QMainWindow):
             # STAR uses the run's suffix (override or template); the CORR volume
             # always uses the template suffix (--override_suffix doesn't rename it).
             star_pat = f"*{apx}Apx{template_match_suffix(params)}.star"
-            corr_pat = f"*{apx}Apx{template_corr_suffix(params)}_corr.mrc"
+            corr_suffix = template_corr_suffix(params)
+        # If the template suffix is known, target it exactly; otherwise a wildcard
+        # middle catches the template name (e.g. *12.56Apx*_corr.mrc matches
+        # *_emd_70905_corr.mrc) — one corr per tomogram when there's one template.
+        corr_pat = (f"*{apx}Apx{corr_suffix}_corr.mrc" if corr_suffix
+                    else f"*{apx}Apx*_corr.mrc")
         cmd = (f'{self.tm_vis_launch} '
                f'-rdir warp_tiltseries/reconstruction '
                f'-mdir {mdir} '
@@ -5287,9 +5318,17 @@ class Tomogration(QMainWindow):
             "this run didn't save _corr.mrc volumes):", text=cmd)
         if not ok or not cmd.strip():
             return
+        # Detached (it's a blocking GUI) but tee stdout+stderr to a log so a silent
+        # failure (e.g. a pattern that matched nothing) is inspectable.
+        logf = Path(self.project_root) / ".tomogration_tmvis.log"
         try:
-            subprocess.Popen(["bash", "-lc", cmd.strip()], cwd=str(self.project_root))
-            self._log(f"warp-tm-vis: {cmd.strip()}", "info")
+            with open(logf, "wb") as fh:
+                subprocess.Popen(["bash", "-lc", cmd.strip()],
+                                 cwd=str(self.project_root), stdout=fh, stderr=fh)
+            self._log(f"warp-tm-vis launching (GUI opens in its own window). "
+                      f"If nothing appears, check {logf} or run the command in a "
+                      f"terminal:", "info")
+            self._log(cmd.strip(), "info")
         except OSError as e:
             self._log(f"Could not launch warp-tm-vis: {e}", "fail")
 
