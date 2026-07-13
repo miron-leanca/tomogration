@@ -1812,18 +1812,28 @@ STAGES = [
         "validate": lambda v: (
             "⚠ Set EXACTLY ONE of template_emdb / template_path — matching needs a template."
             if bool(str(v.get("template_emdb", "")).strip())
-            == bool(str(v.get("template_path", "")).strip()) else ""),
+            == bool(str(v.get("template_path", "")).strip())
+            else "⚠ check_hand does NOT work with override_suffix: Warp reads the handedness "
+            "test back under the DEFAULT template name and dies ('Could not find "
+            "…_emd_XXXXX.star', all items fail). Set check_hand 0 for suffixed/forked runs — "
+            "determine handedness ONCE without a suffix, then reuse check_hand 0."
+            if str(v.get("override_suffix", "")).strip() and int(v.get("check_hand") or 0) > 0
+            else ""),
         "docs": {
             "what": "CTF-aware template matching to locate particles "
                     "(apoferritin example values — adapt per target).",
-            "range": "tomo_angpix 8-12; subdivisions 3; check_hand 2.",
-            "effect": "Lower tomo_angpix = finer search, much slower.",
+            "range": "tomo_angpix 8-12; subdivisions 3-4; check_hand 2 (0 with a suffix).",
+            "effect": "Lower tomo_angpix + higher subdivisions = finer, MUCH slower. With "
+                      "--optimize_poses, coarser subdivisions (3-4) suffice — local refinement "
+                      "recovers the precision.",
             "pitfall": "tomo_angpix MUST match a ts_reconstruct --angpix you already ran "
                        "(matching reuses that full tomogram) — else 'A reconstruction at the "
-                       "desired resolution was not found' and every series fails. Defaults to "
-                       "ALL GPUs — set --device_list (e.g. '2 3') to avoid disturbing others "
-                       "on 0/1. Scores are background-normalised, so a threshold is comparable "
-                       "across tomograms.",
+                       "desired resolution was not found' and every series fails. check_hand>0 "
+                       "is INCOMPATIBLE with override_suffix (handedness readback uses the "
+                       "default template name → 'Could not find …_emd_XXXXX.star'): set "
+                       "check_hand 0 for suffixed runs. Defaults to ALL GPUs — set --device_list "
+                       "(e.g. '2 3') to avoid disturbing others on 0/1. Scores are "
+                       "background-normalised, so a threshold is comparable across tomograms.",
         },
         "status": lambda ps: ps.status_template_matches(),
     },

@@ -222,9 +222,16 @@ check("template_match emits --npeaks", "--npeaks 8000" in cmd)
 check("template blank -> no template flags",
       "--template_emdb" not in app.build_command(tm, app.stage_defaults(tm)))
 check("validate warns when neither template set", bool(tm["validate"](app.stage_defaults(tm))))
-check("validate ok when exactly one set", tm["validate"](v) == "")
+vok = app.stage_defaults(tm); vok["template_emdb"] = "70905"
+check("validate ok when exactly one set", tm["validate"](vok) == "")
 vboth = app.stage_defaults(tm); vboth["template_emdb"] = "70905"; vboth["template_path"] = "/x.mrc"
 check("validate warns when both set", bool(tm["validate"](vboth)))
+# check_hand > 0 is incompatible with override_suffix (Warp readback bug)
+vhand = app.stage_defaults(tm); vhand["template_emdb"] = "70905"
+vhand["override_suffix"] = "_v1"; vhand["check_hand"] = 2
+check("validate warns check_hand + override_suffix", bool(tm["validate"](vhand)))
+vhand0 = dict(vhand); vhand0["check_hand"] = 0
+check("validate ok check_hand 0 + override_suffix", tm["validate"](vhand0) == "")
 
 # ---- DIR_FILE_HINTS covers every STAGE_IO input/output dir -----------------
 io_dirs = set()
