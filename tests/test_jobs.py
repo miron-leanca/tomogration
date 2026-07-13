@@ -98,6 +98,12 @@ with tempfile.TemporaryDirectory() as tmp:
     check("trunk has NO input flag", "--input_processing" not in flags)
     check("aretomo no io flags",
           app.io_flags_for_job(stage("aretomo"), trunk, store) == "")
+    # threshold_picks: only --output_processing (inputs are staged into its own dir)
+    thr = {"id": "J9", "inputs": {"processing": "J3"}, "output_dir": "jobs/J9"}
+    tflags = app.io_flags_for_job(stage("threshold_picks"), thr, store)
+    check("threshold has output flag", "--output_processing jobs/J9" in tflags)
+    check("threshold has NO input flag (staged in place)",
+          "--input_processing" not in tflags)
 
     # ---- build_job_command -------------------------------------------------
     cmd = app.build_job_command(stage("ts_reconstruct"), recon, store,

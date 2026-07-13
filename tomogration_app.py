@@ -2457,13 +2457,19 @@ def io_flags_for_job(spec, job, store):
     """Extra tokens wiring a WarpTools job to its own processing dir (and its
     parent's, if any). Wrapper stages return '' — they resolve in/out dirs by
     their own means. A parent with no job id (trunk) yields no --input_processing,
-    so the run reads the .settings default, exactly like the three-column view."""
+    so the run reads the .settings default, exactly like the three-column view.
+
+    threshold_picks is special: it reads AND writes its match stars in
+    <output_processing>/matching in place, so its inputs are STAGED into its own
+    dir (_prepare_job_inputs) and it only takes --output_processing (a stale
+    --input_processing at the parent, which has no .xml, would look for previous
+    results in the wrong place)."""
     if not is_warp_stage(spec):
         return ""
     toks = []
     pid = parent_job_id(job)
     parent = store.get("jobs", {}).get(pid) if pid else None
-    if parent:
+    if parent and spec.get("id") != "threshold_picks":
         toks.append(f"--input_processing {parent['output_dir']}")
     toks.append(f"--output_processing {job['output_dir']}")
     return " ".join(toks)
@@ -5637,6 +5643,53 @@ class Tomogration(QMainWindow):
     # share the single runner, so the busy-check keeps them mutually exclusive.
     # NOTE: jobs deliberately do NOT auto-recover (that fs_motion_and_ctf retry
     # logic is bound to the three-column _active_stage/_active_cmd path).
+    @staticmethod
+    def _link_into(src_dir, dst_dir, keep):
+        """Symlink files in src_dir accepted by keep(name) into dst_dir, pointing at
+        the REAL files (no symlink chains). Non-destructive: never clobbers. -> count."""
+        n = 0
+        for f in itertools.islice(sorted(src_dir.iterdir()), 0, 40000):
+            if not keep(f.name):
+                continue
+            link = dst_dir / f.name
+            if link.exists() or link.is_symlink():
+                continue
+            try:
+                link.symlink_to(os.path.realpath(f))
+                n += 1
+            except OSError:
+                pass
+        return n
+
+    def _prepare_job_inputs(self, job, store):
+        """threshold_picks reads AND writes its match stars in <output_processing>/
+        matching/ IN PLACE (and reads the per-series .xml for selection/metadata),
+        so a fresh jobs/J### has nothing to read. Stage its inputs into its own dir:
+        the PARENT's matching stars (+corr) into jobs/J###/matching, and the trunk
+        warp_tiltseries/*.xml (selection state) into jobs/J###/. All symlinks to the
+        real files — non-destructive."""
+        if job.get("stage_id") != "threshold_picks":
+            return
+        parent = store.get("jobs", {}).get(parent_job_id(job) or "")
+        root = Path(self.project_root)
+        jobdir = root / job["output_dir"]
+        if not parent:
+            return
+        msrc = root / parent["output_dir"] / "matching"
+        if not msrc.is_dir():
+            self._log(f"{job['id']}: parent {parent['id']} has no matching/ to read.", "fail")
+            return
+        mdst = jobdir / "matching"
+        mdst.mkdir(parents=True, exist_ok=True)
+        nm = self._link_into(msrc, mdst,
+                             lambda nm: nm.endswith(".star") or nm.endswith("_corr.mrc"))
+        # per-series metadata (.xml) — carries the selection; take it from the trunk
+        xsrc = root / "warp_tiltseries"
+        nx = self._link_into(xsrc, jobdir, lambda nm: nm.endswith(".xml")) \
+            if xsrc.is_dir() else 0
+        self._log(f"{job['id']}: staged {nm} match file(s) from {parent['id']} + {nx} "
+                  f".xml into {job['output_dir']} for thresholding.", "info")
+
     def _run_job(self, job_id):
         if self.runner.busy():
             self._log("a job is already running — wait for it to finish.", "fail")
@@ -5656,6 +5709,7 @@ class Tomogration(QMainWindow):
         except OSError as e:
             self._log(f"job {job_id}: cannot create {job['output_dir']}: {e}", "fail")
             return
+        self._prepare_job_inputs(job, store)
         cmd = build_job_command(spec, job, store, self.warp_launch, self._group_inputs)
         update_job(self.project_root, job_id, command=cmd, status="running",
                    exit_code=None, finished=None,

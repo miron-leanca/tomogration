@@ -9,6 +9,7 @@ three-column stage path is left alone.
     python3 tests/test_dispatch.py
 """
 import sys
+import os
 import tempfile
 import importlib.util
 from pathlib import Path
@@ -241,6 +242,39 @@ with tempfile.TemporaryDirectory() as tmp:
           st["inputs"].get("processing") == old_tm["id"])
     check("pending parent consumed after build",
           "threshold_picks" not in dw._pending_parent)
+
+    # ---- threshold job: parent's matching linked into the job's own dir ---
+    pw = Win(root)
+    pw._pending_parent = {}
+    tm_job = app.new_job(root, "ts_template_match", "M",
+                         {"tomo_angpix": "12.56", "override_suffix": "_v9"})
+    pm = root / tm_job["output_dir"] / "matching"
+    pm.mkdir(parents=True)
+    for s in ("Position042", "Position046"):
+        (pm / f"{s}_12.56Apx_v9.star").write_text("x")
+        (pm / f"{s}_12.56Apx_emd_70905_corr.mrc").write_bytes(b"\0")
+    thr2 = app.new_job(root, "threshold_picks", "T",
+                       {"in_suffix": "12.56Apx_v9", "out_suffix": "clean", "minimum": 3},
+                       inputs={"processing": tm_job["id"]})
+    pw.runner._busy = False
+    pw._run_job(thr2["id"])
+    jm = root / thr2["output_dir"] / "matching"
+    stars = sorted(jm.glob("*.star")) if jm.is_dir() else []
+    check("threshold job's matching/ was populated from parent",
+          len(stars) == 2 and all(s.is_symlink() for s in stars))
+    check("threshold prep also linked corr maps",
+          len(list(jm.glob("*_corr.mrc"))) == 2)
+    check("threshold prep links resolve to real files",
+          stars and Path(os.path.realpath(stars[0])).exists())
+
+    # non-threshold job is not pre-populated
+    rj = Win(root)
+    rj._pending_parent = {}
+    rec_job = app.new_job(root, "ts_reconstruct", "R", {"angpix": "10"})
+    rj.runner._busy = False
+    rj._run_job(rec_job["id"])
+    check("non-threshold job has no matching/ prep",
+          not (root / rec_job["output_dir"] / "matching").exists())
 
     # ---- _adopt_orphan: register an on-disk pick set as a job -------------
     aw = Win(root)
