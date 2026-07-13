@@ -307,5 +307,43 @@ exp = next(s for s in app.STAGES if s["id"] == "ts_export_particles")
 check("export still emits --3d by default",
       "--3d" in app.build_command(exp, app.stage_defaults(exp)).split())
 
+# ---- discover_picksets + orphan cards (Phase: adopt on-disk sets) ----------
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    md = root / "warp_tiltseries" / "matching"
+    md.mkdir(parents=True)
+    # two pick sets by suffix, over 2 series, + non-star noise
+    for series in ("Position042", "Position046"):
+        (md / f"{series}_12.56Apx260712v2.star").write_text("x")
+        (md / f"{series}_12.56Apx_emd_70905.star").write_text("x")
+        (md / f"{series}_12.56Apx_emd_70905_corr.mrc").write_bytes(b"\0")  # not a .star
+    orphs = app.discover_picksets(root, app.load_jobs(root))
+    by_suffix = {o["suffix"]: o for o in orphs}
+    check("discovers both suffixes", set(by_suffix) == {"260712v2", "_emd_70905"})
+    check("counts series per set", by_suffix["260712v2"]["n_series"] == 2)
+    check("parses angpix", by_suffix["260712v2"]["angpix"] == "12.56")
+    check("ignores non-star files", all(".mrc" not in o["suffix"] for o in orphs))
+
+    # a job already covering a suffix hides that orphan
+    app.new_job(root, "ts_template_match", "M", {"override_suffix": "260712v2",
+                                                 "template_emdb": "70905"})
+    orphs2 = app.discover_picksets(root, app.load_jobs(root))
+    check("existing job hides its suffix",
+          {o["suffix"] for o in orphs2} == {"_emd_70905"})
+
+    # orphans render as extra 'orphan' cards in the ts_template_match row
+    nodes, _ = app.canvas_layout(app.load_jobs(root), orphs)
+    onodes = [n for n in nodes if n.get("is_orphan")]
+    check("orphan nodes created", len(onodes) == len(orphs))
+    check("orphan node styling", onodes and onodes[0]["status"] == "orphan"
+          and onodes[0]["stage_id"] == "ts_template_match")
+    check("orphan sits beside the real job in its row",
+          onodes and onodes[0]["row"] == next(n["row"] for n in nodes
+                                              if n["stage_id"] == "ts_template_match"
+                                              and not n.get("is_orphan"))
+          and onodes[0]["col"] >= 1)
+    check("canvas_layout without orphans still works",
+          app.canvas_layout(app.load_jobs(root)) is not None)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

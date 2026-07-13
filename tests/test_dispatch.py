@@ -209,6 +209,32 @@ with tempfile.TemporaryDirectory() as tmp:
     check("_fork_job opened it in the builder",
           getattr(bw3, "_selected", None) == "ts_reconstruct")
 
+    # ---- _adopt_orphan: register an on-disk pick set as a job -------------
+    aw = Win(root)
+    md = root / "warp_tiltseries" / "matching"
+    md.mkdir(parents=True, exist_ok=True)
+    for series in ("Position042", "Position046"):
+        (md / f"{series}_12.56Apx260712v9.star").write_text("x")
+    orphs = app.discover_picksets(root, app.load_jobs(root))
+    orph = next(o for o in orphs if o["suffix"] == "260712v9")
+    before = set(app.load_jobs(root)["jobs"])
+    aw._adopt_orphan(orph)
+    after = app.load_jobs(root)["jobs"]
+    new_ids = set(after) - before
+    check("adopt created one job", len(new_ids) == 1)
+    adopted = after[next(iter(new_ids))]
+    check("adopted job is completed ts_template_match",
+          adopted["stage_id"] == "ts_template_match" and adopted["status"] == "completed")
+    check("adopted job records its suffix", adopted.get("orphan_suffix") == "260712v9")
+    linkdir = root / adopted["output_dir"] / "matching"
+    links = list(linkdir.glob("*.star")) if linkdir.is_dir() else []
+    check("adopt symlinked the stars into the job dir", len(links) == 2)
+    check("adopt used symlinks (non-destructive)",
+          links and links[0].is_symlink() and (md / links[0].name).exists())
+    check("adopted suffix no longer discovered as orphan",
+          "260712v9" not in {o["suffix"] for o in
+                             app.discover_picksets(root, app.load_jobs(root))})
+
     # ---- _apply_layout + _show_card_details (Phase 3 layout) ---------------
     # Exercise the real method bodies with controlled fakes (the stub can't run
     # a full window: `while layout.count()` never ends on a _Perm). Catches

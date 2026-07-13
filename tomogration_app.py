@@ -2305,12 +2305,18 @@ DIR_FILE_HINTS = {
     ".": "(project root)",
 }
 
-# Stages whose output dir should be ARCHIVED (renamed aside, timestamped) instead
-# of overwritten when re-run, so historic results stay reviewable. Only stages that
-# write a self-contained product into a dedicated dir (downstream reads the fresh
-# one) — NOT incremental/idempotent steps (fs_motion_and_ctf, ts_stack, settings).
-# AreTomo already self-versions (aretomo_output-vN), so it's not listed here.
-ARCHIVE_ON_RERUN = {"ts_reconstruct", "ts_template_match"}
+# Retired: the app used to archive ts_reconstruct/ts_template_match outputs to
+# <dir>.bak_<ts> on re-run so nothing was lost. That surprised users (their
+# terminal-made picks got moved aside) and the job model supersedes it — each job
+# writes its OWN jobs/J### dir, so variants coexist without shuffling shared dirs.
+# Kept empty (not deleted) so _record_history_start stays a no-op archiver.
+ARCHIVE_ON_RERUN = set()
+
+# Back-half stages that produce a self-contained product and are worth running as
+# JOB instances (own dir, forkable, interconnectable) rather than overwriting the
+# shared trunk. ▶ Run offers to build these as a job.
+JOB_STAGES = {"ts_ctf", "ts_reconstruct", "ts_template_match", "threshold_picks",
+              "ts_export_particles", "relion4_convert", "relion4_class3d"}
 
 # File-open routing for the Processing-History detail view.
 THREEDMOD_EXTS = {".mrc", ".mrcs", ".st", ".ali", ".rec", ".preali", ".mod", ".map"}
@@ -2701,7 +2707,7 @@ def stage_title(stage_id, fallback=""):
     return FRIENDLY_TITLES.get(stage_id, fallback or stage_id)
 
 
-def canvas_layout(store):
+def canvas_layout(store, orphans=None):
     """Positioned workflow graph for the canvas. Returns (nodes, edges).
 
     One ROW per stage, in canonical STAGES order. A stage with no jobs shows a
@@ -2709,7 +2715,9 @@ def canvas_layout(store):
     jobs shows one real node per job, spread across COLUMNS so forks sit side by
     side. Edges: real jobs link to their parent job (the true DAG); stages with
     no real parent are chained along the ghost trunk so the default pipeline
-    reads as a connected flow."""
+    reads as a connected flow. `orphans` (from discover_picksets) are on-disk
+    outputs made outside the app — placed as extra 'orphan' cards in their stage's
+    row, offering adoption."""
     jobs = store.get("jobs", {}) if isinstance(store, dict) else {}
     by_stage = {}
     for jid, job in jobs.items():
@@ -2717,12 +2725,14 @@ def canvas_layout(store):
     for lst in by_stage.values():
         lst.sort(key=lambda t: t[0])
 
-    nodes, index, row_first = [], {}, {}
+    nodes, index, row_first, row_of, cols_used = [], {}, {}, {}, {}
     for row, spec in enumerate(STAGES):
         sid = spec["id"]
+        row_of[sid] = row
         y = row * (CARD_H + GAP_Y)
         title = stage_title(sid, spec.get("label", sid))
         js = by_stage.get(sid, [])
+        cols_used[sid] = max(1, len(js))
         if not js:
             nid = f"ghost:{sid}"
             n = {"id": nid, "stage_id": sid, "label": spec.get("label", sid),
@@ -2761,7 +2771,67 @@ def canvas_layout(store):
         src, dst = row_first.get(a), row_first.get(b)
         if src and dst:
             edges.append((src, dst))
+
+    # Orphan cards: on-disk pick sets made outside the app, placed after the real
+    # jobs in their stage's row and flagged so the UI can offer 'Adopt as job'.
+    for i, orph in enumerate(orphans or []):
+        sid = orph.get("stage_id", "ts_template_match")
+        if sid not in row_of:
+            continue
+        col = cols_used.get(sid, 1)
+        cols_used[sid] = col + 1
+        oid = f"orphan:{sid}:{orph.get('dir','')}:{orph.get('suffix','')}"
+        nodes.append({
+            "id": oid, "stage_id": sid, "is_orphan": True, "is_ghost": False,
+            "label": orph.get("suffix", "?"),
+            "title": stage_title(sid) + " · orphan",
+            "group": "found on disk", "status": "orphan",
+            "row": row_of[sid], "col": col,
+            "x": col * (CARD_W + GAP_X), "y": row_of[sid] * (CARD_H + GAP_Y),
+            "w": CARD_W, "h": CARD_H,
+            "summary": {"series": orph.get("n_series", 0)},
+            "orphan": orph,
+        })
     return nodes, edges
+
+
+_PICK_STAR_RE = re.compile(r'^(Position\d+)_([\d.]+)Apx(.+)\.star$')
+
+
+def discover_picksets(root, store):
+    """Scan warp_tiltseries/matching[.bak_*]/ for template-match pick sets made
+    OUTSIDE the app (distinct by suffix) that aren't already a job. Returns orphan
+    descriptors {stage_id, suffix, dir, angpix, n_series} for the canvas to surface
+    as adoptable cards. Bounded + lazy (never enumerates whole data dirs)."""
+    root = Path(root)
+    known = set()
+    for j in (store.get("jobs", {}) if isinstance(store, dict) else {}).values():
+        if j.get("stage_id") == "ts_template_match":
+            s = template_match_suffix(j.get("params", {}))
+            if s:
+                known.add(s)
+        if j.get("orphan_suffix"):        # an already-adopted set
+            known.add(j["orphan_suffix"])
+    found = {}
+    for mdir in sorted(root.glob("warp_tiltseries/matching*")):
+        if not mdir.is_dir():
+            continue
+        rel = os.path.relpath(mdir, root)
+        for star in itertools.islice(sorted(mdir.glob("Position*Apx*.star")), 0, 20000):
+            m = _PICK_STAR_RE.match(star.name)
+            if not m:
+                continue
+            series, angpix, suffix = m.groups()
+            d = found.setdefault((suffix, rel), {"suffix": suffix, "dir": rel,
+                                                 "angpix": angpix, "series": set()})
+            d["series"].add(series)
+    orphans = []
+    for (suffix, rel), d in sorted(found.items()):
+        if suffix in known:
+            continue
+        orphans.append({"stage_id": "ts_template_match", "suffix": suffix,
+                        "dir": rel, "angpix": d["angpix"], "n_series": len(d["series"])})
+    return orphans
 
 
 # ===========================================================================
@@ -3756,6 +3826,7 @@ _CARD_STYLE = {
     "running":   ("#3a3320", "#e0a850"),
     "completed": ("#1d3326", "#27ae60"),
     "failed":    ("#3a2320", "#c0392b"),
+    "orphan":    ("#332b1a", "#8a6d3b"),   # found-on-disk, not yet a job (amber-brown)
 }
 
 
@@ -3802,12 +3873,13 @@ class _DetailsChip(QGraphicsRectItem):
 
 class JobCanvas(QWidget):
     def __init__(self, root_getter, on_pick, on_details=None, on_menu=None,
-                 parent=None):
+                 on_orphans=None, parent=None):
         super().__init__(parent)
         self._root_getter = root_getter      # callable -> project_root str
         self._on_pick = on_pick              # callable(stage_id)
         self._on_details = on_details        # callable(node) | None
         self._on_menu = on_menu              # callable(node, global_qpoint) | None
+        self._on_orphans = on_orphans        # callable() -> [orphan descriptor] | None
         self.scene = QGraphicsScene(self)
         self.view = QGraphicsView(self.scene)
         self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -3822,7 +3894,13 @@ class JobCanvas(QWidget):
             store = load_jobs(self._root_getter())
         except Exception:
             store = {"jobs": {}}
-        nodes, edges = canvas_layout(store)
+        orphans = []
+        if self._on_orphans is not None:
+            try:
+                orphans = self._on_orphans() or []
+            except Exception:
+                orphans = []
+        nodes, edges = canvas_layout(store, orphans)
         index = {n["id"]: n for n in nodes}
 
         edge_pen = QPen(QColor("#4a4a4a"))
@@ -3843,11 +3921,12 @@ class JobCanvas(QWidget):
     def _add_card(self, n):
         fill, border = _CARD_STYLE.get(n["status"], _CARD_STYLE["ghost"])
         ghost = n["is_ghost"]
+        orphan = n.get("is_orphan", False)
         item = _CardItem(n, self)
         item.setBrush(QBrush(QColor(fill)))
         pen = QPen(QColor(border))
         pen.setWidth(2)
-        if ghost:
+        if ghost or orphan:                 # un-built / found-on-disk look dashed
             pen.setStyle(Qt.PenStyle.DashLine)
         item.setPen(pen)
         self.scene.addItem(item)
@@ -3873,7 +3952,7 @@ class JobCanvas(QWidget):
             st = summary_text(n["summary"])
             sub = n["status"] + (f" · {st}" if st else "")
         text(sub[:36], 11, 56, 9, "#7d7d7d")
-        if not ghost:
+        if not ghost and not orphan:
             text(n["id"], n["w"] - 42, 6, 8, "#9ec5ff")
 
         # Details chip (only if the canvas has a details handler)
@@ -3939,6 +4018,13 @@ class Tomogration(QMainWindow):
         self._persist_timer.setSingleShot(True)
         self._persist_timer.setInterval(600)
         self._persist_timer.timeout.connect(self._persist_param_store)
+        # Periodically re-scan for on-disk pick sets made outside the app (direct
+        # terminal use); only redraw the canvas when the set actually changes.
+        self._last_orphan_keys = None
+        self._discovery_timer = QTimer(self)
+        self._discovery_timer.setInterval(45000)
+        self._discovery_timer.timeout.connect(self._maybe_rediscover)
+        self._discovery_timer.start()
         self._active_stage = None
         self._active_cmd = ""
         self._active_job_id = None    # set while a card-view job (not a stage) runs
@@ -4004,7 +4090,8 @@ class Tomogration(QMainWindow):
             self._panel("listsCard", "Pipeline jobs", self._build_job_lists()))
         self.canvas = JobCanvas(lambda: self.project_root, self._canvas_pick,
                                 on_details=self._show_card_details,
-                                on_menu=self._card_menu)
+                                on_menu=self._card_menu,
+                                on_orphans=self._discover_orphans)
         self.job_stack.addWidget(
             self._panel("canvasCard", "Workflow graph", self.canvas))
         self._build_align_and_command()   # sets self.align_list_card + self.command_card
@@ -4213,6 +4300,34 @@ class Tomogration(QMainWindow):
         title.setWordWrap(True)
         self.details_box.addWidget(title)
 
+        # Orphan = a pick set found on disk (made outside the app). Show where it
+        # is + Adopt/View, then stop (it has no job record to describe).
+        if node.get("is_orphan"):
+            orph = node.get("orphan", {})
+            info = QLabel(f"Found on disk — not yet a job.\n\nsuffix:  {orph.get('suffix','?')}\n"
+                          f"dir:  {orph.get('dir','?')}\nseries:  {orph.get('n_series','?')}"
+                          f"    pixel size:  {orph.get('angpix','?')} Å")
+            info.setStyleSheet("color:#c8b78a;font-size:12px;")
+            info.setWordWrap(True)
+            self.details_box.addWidget(info)
+            self.details_box.addWidget(self._details_heading("ACTIONS"))
+            adopt = QPushButton("✦ Adopt as job")
+            adopt.setToolTip("Register this pick set as a completed job (symlinks its "
+                             "files into jobs/J###/matching — originals stay put) so it "
+                             "wires into the workflow like any other job.")
+            adopt.clicked.connect(lambda _=False, o=orph: self._adopt_orphan(o))
+            self.details_box.addWidget(adopt)
+            view = QPushButton("🔍 View picks (warp-tm-vis)")
+            view.clicked.connect(lambda _=False, n=node: self._view_picks_tm_vis(n))
+            self.details_box.addWidget(view)
+            opendir = self._open_dir_button(f"📂  {orph.get('dir','')}", orph.get("dir", ""))
+            self.details_box.addWidget(opendir)
+            self.details_card.setVisible(True)
+            if getattr(self, "_canvas_split", None) is not None:
+                w = max(self._canvas_split.width(), 900)
+                self._canvas_split.setSizes([int(w * 0.55), int(w * 0.45)])
+            return
+
         if node.get("is_ghost"):
             meta = f"{node.get('group', '')} · {stage_id} · not built yet"
         else:
@@ -4286,10 +4401,85 @@ class Tomogration(QMainWindow):
         vals.update(self._param_store.get(spec["id"], {}))
         return vals
 
+    # ---- orphan discovery + adoption ----
+    def _discover_orphans(self):
+        """On-disk pick sets made outside the app, for the canvas to surface."""
+        try:
+            return discover_picksets(self.project_root, load_jobs(self.project_root))
+        except Exception:
+            return []
+
+    def _maybe_rediscover(self):
+        """Timer tick: refresh the canvas only if the found-on-disk set changed (and
+        only in card view, to avoid churn while the user is in the list view)."""
+        if getattr(self, "_view_mode", "lists") != "canvas":
+            return
+        keys = {(o.get("dir"), o.get("suffix")) for o in self._discover_orphans()}
+        if keys != self._last_orphan_keys:
+            self._last_orphan_keys = keys
+            self._refresh_canvas()
+
+    def _adopt_orphan(self, orph):
+        """Turn a found-on-disk pick set into a real (completed) job: symlink its
+        STAR + corr/score files into jobs/J###/matching (non-destructive — the
+        originals stay put), and record the job with its inferred params so it
+        wires into the DAG like any other. Symlinks (not copies) keep it cheap."""
+        suffix = orph.get("suffix", "")
+        src_rel = orph.get("dir", "")
+        src = Path(self.project_root) / src_rel
+        if not src.is_dir():
+            self._log(f"Adopt: source dir gone: {src_rel}", "fail")
+            return
+        params = {"override_suffix": suffix, "tomo_angpix": orph.get("angpix", "")}
+        job = new_job(self.project_root, "ts_template_match",
+                      f"matching {suffix} (adopted)", params, inputs={})
+        dst = Path(self.project_root) / job["output_dir"] / "matching"
+        try:
+            dst.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self._log(f"Adopt: cannot make {dst}: {e}", "fail")
+            delete_job(self.project_root, job["id"])
+            return
+        # link this suffix's stars + the shared template corr/score maps
+        corr_suffix = template_corr_suffix(params)
+        n = 0
+        for f in itertools.islice(sorted(src.glob(f"*Apx{suffix}.star")), 0, 20000):
+            n += self._symlink_into(f, dst)
+        if corr_suffix:
+            for pat in (f"*Apx{corr_suffix}_corr.mrc", f"*Apx{corr_suffix}_angleid.mrc"):
+                for f in itertools.islice(sorted(src.glob(pat)), 0, 20000):
+                    self._symlink_into(f, dst)
+        update_job(self.project_root, job["id"], status="completed", exit_code=0,
+                   orphan_suffix=suffix,
+                   summary={"series": orph.get("n_series", n)},
+                   finished=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        self._log(f"Adopted pick set '{suffix}' from {src_rel} as {job['id']} "
+                  f"({n} series linked into {job['output_dir']}/matching).", "ok")
+        self._refresh_canvas()
+
+    @staticmethod
+    def _symlink_into(src_file, dst_dir):
+        link = dst_dir / src_file.name
+        try:
+            if link.exists() or link.is_symlink():
+                return 0
+            link.symlink_to(os.path.abspath(src_file))
+            return 1
+        except OSError:
+            return 0
+
     def _card_menu(self, node, global_pos):
         """Right-click menu on a canvas card."""
         menu = QMenu(self)
         sid = node.get("stage_id")
+        if node.get("is_orphan"):
+            menu.addAction("Adopt as job",
+                           lambda: self._adopt_orphan(node.get("orphan", {})))
+            menu.addAction("View picks (warp-tm-vis)",
+                           lambda: self._view_picks_tm_vis(node))
+            menu.addAction("Details", lambda: self._show_card_details(node))
+            menu.exec(global_pos)
+            return
         if node.get("is_ghost"):
             menu.addAction("Build & run job", lambda: self._build_job(sid, run=True))
             menu.addAction("Build (don't run)", lambda: self._build_job(sid, run=False))
@@ -5064,22 +5254,32 @@ class Tomogration(QMainWindow):
         Patterns are scoped to this run's suffix; shown editable before launch so
         the paths/suffix (or a jobs/<id>/ dir) can be adjusted."""
         stage_id = node.get("stage_id")
-        if not node.get("is_ghost") and node.get("id"):
-            params = ((load_jobs(self.project_root).get("jobs", {})
-                       .get(node["id"], {}) or {}).get("params", {}))
-        elif self.current and self.current.get("spec", {}).get("id") == stage_id:
-            params = self._values()
+        orph = node.get("orphan")
+        if orph:
+            # found-on-disk set: point at its (possibly .bak) dir; corr suffix is
+            # unknown from the star name alone, so use a loose *_corr.mrc (editable).
+            apx = fmt_angpix(orph.get("angpix", "12.56"))
+            mdir = orph.get("dir", "warp_tiltseries/matching")
+            star_pat = f"*Apx{orph.get('suffix', '')}.star"
+            corr_pat = "*_corr.mrc"
         else:
-            spec = self._stage_by_id(stage_id) or {}
-            params = self._effective_params(spec) if spec else {}
-        apx = fmt_angpix(params.get("tomo_angpix", "12.56"))
-        # STAR uses the run's suffix (override or template); the CORR volume always
-        # uses the template suffix (--override_suffix doesn't rename it).
-        star_pat = f"*{apx}Apx{template_match_suffix(params)}.star"
-        corr_pat = f"*{apx}Apx{template_corr_suffix(params)}_corr.mrc"
+            if not node.get("is_ghost") and node.get("id"):
+                params = ((load_jobs(self.project_root).get("jobs", {})
+                           .get(node["id"], {}) or {}).get("params", {}))
+            elif self.current and self.current.get("spec", {}).get("id") == stage_id:
+                params = self._values()
+            else:
+                spec = self._stage_by_id(stage_id) or {}
+                params = self._effective_params(spec) if spec else {}
+            apx = fmt_angpix(params.get("tomo_angpix", "12.56"))
+            mdir = "warp_tiltseries/matching"
+            # STAR uses the run's suffix (override or template); the CORR volume
+            # always uses the template suffix (--override_suffix doesn't rename it).
+            star_pat = f"*{apx}Apx{template_match_suffix(params)}.star"
+            corr_pat = f"*{apx}Apx{template_corr_suffix(params)}_corr.mrc"
         cmd = (f'{self.tm_vis_launch} '
                f'-rdir warp_tiltseries/reconstruction '
-               f'-mdir warp_tiltseries/matching '
+               f'-mdir {mdir} '
                f'-mp "{star_pat}" -cvp "{corr_pat}"')
         cmd, ok = QInputDialog.getText(
             self, "Launch warp-tm-vis",
@@ -5145,6 +5345,29 @@ class Tomogration(QMainWindow):
         if not cmd:
             return
         spec = self.current["spec"]
+        # Per-job nudge: for back-half stages, prefer a job (own dir, forkable) over
+        # overwriting the shared trunk. Manual command edits can't carry into a job
+        # (it rebuilds from params + wiring), so only offer this on an unedited cmd.
+        if spec["id"] in JOB_STAGES and not self.current.get("manual"):
+            box = QMessageBox(self)
+            box.setWindowTitle("Run as a job?")
+            box.setText(f"Run '{stage_title(spec['id'], spec['id'])}' as a job?")
+            box.setInformativeText(
+                "A job writes to its own jobs/J### folder — it never overwrites other "
+                "runs and can be forked and wired into downstream jobs. 'Overwrite "
+                "shared' runs the old way, replacing warp_tiltseries/… in place.")
+            as_job = box.addButton("Run as job", QMessageBox.AcceptRole)
+            overwrite = box.addButton("Overwrite shared", QMessageBox.DestructiveRole)
+            box.addButton("Cancel", QMessageBox.RejectRole)
+            box.setDefaultButton(as_job)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is as_job:
+                self._build_job(spec["id"], run=True)
+                return
+            if clicked is not overwrite:
+                return
+            # else: fall through to the classic overwrite-in-place path
         if spec.get("requires_coarse_alignment"):
             if not self._coarse_alignment_gate():
                 return
