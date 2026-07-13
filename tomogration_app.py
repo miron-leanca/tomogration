@@ -2575,12 +2575,22 @@ DOWNSTREAM = {
 }
 
 
+def _picktag(in_suffix):
+    """Short, filesystem-safe pick-set tag from a threshold in_suffix, stripping the
+    '<angpix>Apx' prefix + leading underscore: '12.56Apx_v3-optimized' ->
+    'v3-optimized'. Used to name each export's RELION dir so it maps to its pick set."""
+    t = re.sub(r"^[\d.]+Apx", "", in_suffix or "").lstrip("_")
+    return t or "picks"
+
+
 def derive_child_params(child_stage, parent_stage, parent_params, parent_output_dir=""):
     """Params a downstream job should inherit from its chosen parent, so wiring
-    'J5 -> threshold_picks -> export' auto-fills the fiddly suffix/pattern/dir
-    instead of the user reverse-engineering it. ts_export_particles reads the pick
-    STARs from --input_directory (NOT --input_processing), so it must point at the
-    parent job's own matching dir where those STARs actually live."""
+    'J5 -> threshold -> export -> convert -> Class3D' auto-fills the fiddly
+    suffix/pattern/dir instead of the user reverse-engineering it. Two things this
+    threads: ts_export_particles reads pick STARs from --input_directory (NOT
+    --input_processing), so it points at the parent job's matching dir; and each
+    export writes into a pick-set-named RELION dir (relion4/<tag>/) so multiple
+    exports never collide and the RELION input path maps to its pick set."""
     if child_stage == "threshold_picks" and parent_stage == "ts_template_match":
         return {"in_suffix": match_star_infix(parent_params)}
     if child_stage == "ts_export_particles":
@@ -2588,10 +2598,21 @@ def derive_child_params(child_stage, parent_stage, parent_params, parent_output_
         if parent_stage == "threshold_picks":
             infix = parent_params.get("in_suffix", "")
             out = parent_params.get("out_suffix", "clean")
-            return {"input_directory": mdir, "input_pattern": f"*{infix}_{out}.star"}
-        if parent_stage == "ts_template_match":
-            return {"input_directory": mdir,
-                    "input_pattern": f"*{match_star_infix(parent_params)}.star"}
+            pat = f"*{infix}_{out}.star"
+        else:                                   # straight from template matching
+            infix = match_star_infix(parent_params)
+            pat = f"*{infix}.star"
+        outdir = f"relion4/{_picktag(infix)}"   # e.g. relion4/v3-optimized
+        return {"input_directory": mdir, "input_pattern": pat,
+                "output_processing": outdir, "output_star": f"{outdir}/matching.star"}
+    if child_stage == "relion4_convert" and parent_stage == "ts_export_particles":
+        outdir = parent_params.get("output_processing", "relion4/warp")
+        return {"project_dir": outdir,
+                "starfile": os.path.basename(parent_params.get("output_star", "matching.star"))}
+    if child_stage == "relion4_class3d" and parent_stage == "relion4_convert":
+        outdir = parent_params.get("project_dir", "relion4/warp")
+        base = os.path.splitext(os.path.basename(parent_params.get("starfile", "matching.star")))[0]
+        return {"project_dir": outdir, "particles": f"{base}_conv.star"}
     return {}
 
 

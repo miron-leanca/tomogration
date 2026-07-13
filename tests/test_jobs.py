@@ -363,22 +363,34 @@ check("threshold inherits in_suffix from template match",
       app.derive_child_params("threshold_picks", "ts_template_match",
                               {"tomo_angpix": "12.56", "override_suffix": "_v3-optimized"})
       == {"in_suffix": "12.56Apx_v3-optimized"})
-check("export inherits pattern + dir from threshold",
-      app.derive_child_params("ts_export_particles", "threshold_picks",
-                              {"in_suffix": "12.56Apx_v3-optimized", "out_suffix": "clean"},
-                              "jobs/J8")
-      == {"input_directory": "jobs/J8/matching",
-          "input_pattern": "*12.56Apx_v3-optimized_clean.star"})
-check("export inherits pattern + dir from template match",
-      app.derive_child_params("ts_export_particles", "ts_template_match",
-                              {"tomo_angpix": "12.56", "override_suffix": "_v3-optimized"},
-                              "jobs/J5")
-      == {"input_directory": "jobs/J5/matching",
-          "input_pattern": "*12.56Apx_v3-optimized.star"})
+exp_from_thr = app.derive_child_params(
+    "ts_export_particles", "threshold_picks",
+    {"in_suffix": "12.56Apx_v3-optimized", "out_suffix": "clean"}, "jobs/J8")
+check("export reads the parent job's matching dir",
+      exp_from_thr["input_directory"] == "jobs/J8/matching")
+check("export pattern from threshold",
+      exp_from_thr["input_pattern"] == "*12.56Apx_v3-optimized_clean.star")
+check("export writes into a pick-set-named RELION dir",
+      exp_from_thr["output_processing"] == "relion4/v3-optimized"
+      and exp_from_thr["output_star"] == "relion4/v3-optimized/matching.star")
+check("_picktag strips angpix prefix", app._picktag("12.56Apx_v3-optimized") == "v3-optimized")
+check("_picktag from emd", app._picktag("10.00Apx_emd_70905") == "emd_70905")
 check("export dir falls back to trunk without a parent dir",
       app.derive_child_params("ts_export_particles", "threshold_picks",
                               {"in_suffix": "x", "out_suffix": "clean"})
       .get("input_directory") == "warp_tiltseries/matching")
+
+# convert inherits the export's RELION dir + star name; Class3D inherits the
+# converted star — so the whole handoff stays in relion4/<tag>/
+conv = app.derive_child_params("relion4_convert", "ts_export_particles",
+                               {"output_processing": "relion4/v3-optimized",
+                                "output_star": "relion4/v3-optimized/matching.star"})
+check("convert inherits project dir + star",
+      conv == {"project_dir": "relion4/v3-optimized", "starfile": "matching.star"})
+cls = app.derive_child_params("relion4_class3d", "relion4_convert",
+                              {"project_dir": "relion4/v3-optimized", "starfile": "matching.star"})
+check("Class3D inherits dir + the CONVERTED star",
+      cls == {"project_dir": "relion4/v3-optimized", "particles": "matching_conv.star"})
 check("no derivation for unrelated pair",
       app.derive_child_params("ts_reconstruct", "ts_ctf", {}) == {})
 check("DOWNSTREAM edges present",
