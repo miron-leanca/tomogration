@@ -3903,10 +3903,12 @@ class ProcessingHistory(QDialog):
 _CARD_STYLE = {
     "ghost":     ("#242424", "#555555"),
     "queued":    ("#26313a", "#3a6ea5"),
-    "running":   ("#3a3320", "#e0a850"),
+    "running":   ("#4a3a12", "#f0a92a"),   # BRIGHT amber — the unmistakable one
     "completed": ("#1d3326", "#27ae60"),
     "failed":    ("#3a2320", "#c0392b"),
-    "orphan":    ("#332b1a", "#8a6d3b"),   # found-on-disk, not yet a job (amber-brown)
+    # Found-on-disk, not yet a job. VIOLET on purpose: the old amber-brown was too
+    # close to 'running' and read as "this job is live" when it wasn't.
+    "orphan":    ("#2b2436", "#8a6ec0"),
 }
 
 
@@ -3980,13 +3982,16 @@ class _CanvasView(QGraphicsView):
 
 class JobCanvas(QWidget):
     def __init__(self, root_getter, on_pick, on_details=None, on_menu=None,
-                 on_orphans=None, parent=None):
+                 on_orphans=None, on_active=None, parent=None):
         super().__init__(parent)
         self._root_getter = root_getter      # callable -> project_root str
         self._on_pick = on_pick              # callable(stage_id)
         self._on_details = on_details        # callable(node) | None
         self._on_menu = on_menu              # callable(node, global_qpoint) | None
         self._on_orphans = on_orphans        # callable() -> [orphan descriptor] | None
+        self._on_active = on_active          # callable() -> {running, label, progress,
+                                             #                job_id|stage_id} | None
+        self._active = {}
         self.scene = QGraphicsScene(self)
         self.view = _CanvasView(self.scene)
         self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -3996,6 +4001,10 @@ class JobCanvas(QWidget):
         lay.addWidget(self.view)
 
     def refresh(self):
+        # Keep the user's scroll position — this repaints every few seconds while a
+        # run is live, and yanking the view around would be maddening.
+        hb = self.view.horizontalScrollBar().value()
+        vb = self.view.verticalScrollBar().value()
         self.scene.clear()
         try:
             store = load_jobs(self._root_getter())
@@ -4007,6 +4016,12 @@ class JobCanvas(QWidget):
                 orphans = self._on_orphans() or []
             except Exception:
                 orphans = []
+        self._active = {}
+        if self._on_active is not None:
+            try:
+                self._active = self._on_active() or {}
+            except Exception:
+                self._active = {}
         nodes, edges = canvas_layout(store, orphans)
         index = {n["id"]: n for n in nodes}
 
@@ -4022,17 +4037,36 @@ class JobCanvas(QWidget):
         for n in nodes:
             self._add_card(n)
 
+        # RUNNING banner — a trunk run (▶ Run) has no card of its own, so without
+        # this there'd be NO on-canvas sign that anything is live.
+        if self._active.get("running"):
+            prog = self._active.get("progress", "")
+            txt = "▶  RUNNING:  " + self._active.get("label", "")
+            if prog:
+                txt += f"      {prog}"
+            banner = QGraphicsSimpleTextItem(txt)
+            banner.setBrush(QColor("#f0a92a"))
+            bf = QFont()
+            bf.setPointSize(13)
+            bf.setBold(True)
+            banner.setFont(bf)
+            banner.setPos(4, -48)
+            self.scene.addItem(banner)
+
         rect = self.scene.itemsBoundingRect()
         self.scene.setSceneRect(rect.adjusted(-40, -40, 40, 40))
+        self.view.horizontalScrollBar().setValue(hb)
+        self.view.verticalScrollBar().setValue(vb)
 
     def _add_card(self, n):
         fill, border = _CARD_STYLE.get(n["status"], _CARD_STYLE["ghost"])
         ghost = n["is_ghost"]
         orphan = n.get("is_orphan", False)
+        running = (n["status"] == "running")
         item = _CardItem(n, self)
         item.setBrush(QBrush(QColor(fill)))
         pen = QPen(QColor(border))
-        pen.setWidth(2)
+        pen.setWidth(3 if running else 2)   # running gets a heavier outline too
         if ghost or orphan:                 # un-built / found-on-disk look dashed
             pen.setStyle(Qt.PenStyle.DashLine)
         item.setPen(pen)
@@ -4055,10 +4089,14 @@ class JobCanvas(QWidget):
         text(n["stage_id"], 11, 40, 8, "#6f6f6f")     # raw command, for power users
         if ghost:
             sub = "not built"
+        elif running:
+            prog = (self._active.get("progress", "")
+                    if self._active.get("job_id") == n.get("id") else "")
+            sub = "▶ running" + (f" · {prog}" if prog else "")
         else:
             st = summary_text(n["summary"])
             sub = n["status"] + (f" · {st}" if st else "")
-        text(sub[:36], 11, 56, 9, "#7d7d7d")
+        text(sub[:36], 11, 56, 9, "#f0a92a" if running else "#7d7d7d")
         if not ghost and not orphan:
             text(n["id"], n["w"] - 42, 6, 8, "#9ec5ff")
 
@@ -4132,6 +4170,13 @@ class Tomogration(QMainWindow):
         self._discovery_timer.setInterval(45000)
         self._discovery_timer.timeout.connect(self._maybe_rediscover)
         self._discovery_timer.start()
+        # Live run indicator: latest "N/M" progress line + a 5s canvas repaint while
+        # anything is running, so the RUNNING banner/card actually tracks the run.
+        self._run_progress = ""
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(5000)
+        self._live_timer.timeout.connect(self._live_tick)
+        self._live_timer.start()
         self._active_stage = None
         self._active_cmd = ""
         self._active_job_id = None    # set while a card-view job (not a stage) runs
@@ -4199,7 +4244,8 @@ class Tomogration(QMainWindow):
         self.canvas = JobCanvas(lambda: self.project_root, self._canvas_pick,
                                 on_details=self._show_card_details,
                                 on_menu=self._card_menu,
-                                on_orphans=self._discover_orphans)
+                                on_orphans=self._discover_orphans,
+                                on_active=self._active_info)
         self.job_stack.addWidget(
             self._panel("canvasCard", "Workflow graph", self.canvas))
         self._build_align_and_command()   # sets self.align_list_card + self.command_card
@@ -4531,6 +4577,30 @@ class Tomogration(QMainWindow):
         keys = {(o.get("dir"), o.get("suffix")) for o in self._discover_orphans()}
         if keys != self._last_orphan_keys:
             self._last_orphan_keys = keys
+            self._refresh_canvas()
+
+    def _active_info(self):
+        """What's running right now, for the canvas RUNNING banner. Covers BOTH a
+        card-view job AND a three-column trunk run (▶ Run), which has no card of its
+        own — without this the canvas gives no sign that anything is live."""
+        if not self.runner.busy():
+            return {}
+        prog = getattr(self, "_run_progress", "")
+        jid = getattr(self, "_active_job_id", None)
+        if jid:
+            job = load_jobs(self.project_root).get("jobs", {}).get(jid, {}) or {}
+            return {"running": True, "job_id": jid, "progress": prog,
+                    "label": f"{jid} · {stage_title(job.get('stage_id', ''))}"}
+        sid = getattr(self, "_active_stage", None)
+        if sid:
+            return {"running": True, "stage_id": sid, "progress": prog,
+                    "label": f"{stage_title(sid)}  (trunk run — not a job)"}
+        return {"running": True, "progress": prog, "label": "job"}
+
+    def _live_tick(self):
+        """While something is running, repaint the canvas so the RUNNING banner and
+        its N/M progress stay current. Idle -> no work."""
+        if getattr(self, "_view_mode", "lists") == "canvas" and self.runner.busy():
             self._refresh_canvas()
 
     def _adopt_orphan(self, orph):
@@ -6238,6 +6308,9 @@ class Tomogration(QMainWindow):
                    "ok": "#27ae60", "success": "#27ae60", "warning": "#e0a850",
                    "error": "#e24b4a", "fail": "#e24b4a"}
         is_progress = level in ("out", "err") and bool(_PROGRESS_RE.match(text))
+        if is_progress:
+            # Latest "N/M …" line — surfaced live on the canvas's RUNNING banner.
+            self._run_progress = text.strip()[:40]
         # WarpTools prints a blank spacer line between progress updates — swallow
         # it so it doesn't break the in-place collapse below.
         if not text.strip() and self._last_was_progress:

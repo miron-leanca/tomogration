@@ -302,6 +302,27 @@ with tempfile.TemporaryDirectory() as tmp:
           "260712v9" not in {o["suffix"] for o in
                              app.discover_picksets(root, app.load_jobs(root))})
 
+    # ---- _active_info: the canvas RUNNING banner (job AND trunk runs) ------
+    iw = Win(root)
+    iw.runner._busy = False
+    check("idle -> no running banner", iw._active_info() == {})
+    # a trunk run (▶ Run) has no card of its own — it MUST still report as running
+    iw.runner._busy = True
+    iw._active_job_id = None
+    iw._active_stage = "ts_template_match"
+    iw._run_progress = "6/290, 01:21:50 remaining"
+    info = iw._active_info()
+    check("trunk run reports running", info.get("running") is True)
+    check("trunk run carries its stage", info.get("stage_id") == "ts_template_match")
+    check("trunk run label says it's not a job", "trunk run" in info.get("label", ""))
+    check("live progress surfaced", info.get("progress").startswith("6/290"))
+    # a job run reports its J-id so the card can be highlighted
+    jrun = app.new_job(root, "ts_ctf", "CTF", {})
+    iw._active_job_id = jrun["id"]
+    info = iw._active_info()
+    check("job run reports its job id", info.get("job_id") == jrun["id"])
+    check("job run label names the job", jrun["id"] in info.get("label", ""))
+
     # ---- _apply_layout + _show_card_details (Phase 3 layout) ---------------
     # Exercise the real method bodies with controlled fakes (the stub can't run
     # a full window: `while layout.count()` never ends on a _Perm). Catches
