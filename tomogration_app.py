@@ -2316,9 +2316,18 @@ ARCHIVE_ON_RERUN = set()
 
 # Back-half stages that produce a self-contained product and are worth running as
 # JOB instances (own dir, forkable, interconnectable) rather than overwriting the
-# shared trunk. ▶ Run offers to build these as a job.
-JOB_STAGES = {"ts_ctf", "ts_reconstruct", "ts_template_match", "threshold_picks",
+# shared trunk. ▶ Run offers to build these as a job. NOTE ts_template_match is NOT
+# here: it reads the SHARED reconstructions and its --override_suffix already keeps
+# pick sets distinct, so it runs on the trunk and is surfaced as a card by the
+# discover/adopt flow (a per-job dir would hide the reconstructions from it).
+JOB_STAGES = {"ts_ctf", "ts_reconstruct", "threshold_picks",
               "ts_export_particles", "relion4_convert", "relion4_class3d"}
+
+# WarpTools stages that must run on the TRUNK (no --output_processing): they read
+# shared products (reconstructions) that only exist in the trunk processing dir, and
+# distinguish their own output by suffix. Wiring them to a job dir makes WarpTools
+# look for those shared inputs in the empty job dir ("reconstruction not found").
+TRUNK_STAGES = {"ts_template_match"}
 
 # File-open routing for the Processing-History detail view.
 THREEDMOD_EXTS = {".mrc", ".mrcs", ".st", ".ali", ".rec", ".preali", ".mod", ".map"}
@@ -2468,6 +2477,8 @@ def io_flags_for_job(spec, job, store):
     results in the wrong place)."""
     if not is_warp_stage(spec):
         return ""
+    if spec.get("id") in TRUNK_STAGES:
+        return ""            # trunk-only: reads shared reconstructions, suffix-distinct output
     toks = []
     pid = parent_job_id(job)
     parent = store.get("jobs", {}).get(pid) if pid else None
