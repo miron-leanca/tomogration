@@ -1,0 +1,607 @@
+<!doctype html><meta charset='utf-8'><style>
+@page { size: A4; margin: 14mm 12mm; }
+* { box-sizing: border-box; }
+body { font: 10.5px/1.45 -apple-system, "Helvetica Neue", Arial, sans-serif;
+       color: #1a1a1a; margin: 0; }
+h1 { font-size: 22px; margin: 0 0 2px; }
+.sub { color: #666; font-size: 11px; margin-bottom: 14px; }
+.legend { background: #f4f6f8; border: 1px solid #dde3e8; border-radius: 6px;
+          padding: 8px 10px; margin-bottom: 14px; font-size: 10px; }
+.legend code { background: #e6ebf0; padding: 0 3px; border-radius: 3px; }
+.card { border: 1px solid #d3dae0; border-radius: 7px; padding: 9px 11px 8px;
+        margin: 0 0 9px; page-break-inside: avoid; background: #fff; }
+.card h2 { font-size: 13.5px; margin: 0 0 1px; color: #12304d; }
+.cmd { font-family: "SF Mono", Menlo, monospace; font-size: 9.5px; color: #7a4a00;
+       background: #fdf6e9; border: 1px solid #f0e2c8; border-radius: 4px;
+       padding: 1px 5px; display: inline-block; margin-bottom: 4px; }
+.what-p { margin: 3px 0 6px; color: #333; }
+.io { display: flex; gap: 10px; }
+.col { flex: 1 1 50%; min-width: 0; }
+h3 { font-size: 9.5px; letter-spacing: .06em; margin: 0 0 2px; }
+h3.reads  { color: #1668b0; } h3.writes { color: #1a7a45; }
+.dirs { font-size: 9px; color: #667; margin-bottom: 3px; }
+table { width: 100%; border-collapse: collapse; }
+td { vertical-align: top; padding: 1.5px 0; border-top: 1px solid #eef1f4; }
+td.path { font-family: "SF Mono", Menlo, monospace; font-size: 8.8px; color: #0b3d63;
+          width: 47%; padding-right: 6px; word-break: break-all; }
+td.what { font-size: 9px; color: #444; }
+td.none { color: #999; font-size: 9px; }
+.flags { margin-top: 6px; font-size: 9px; color: #555; }
+.flag { font-family: "SF Mono", Menlo, monospace; background: #eef2f6; border-radius: 3px;
+        padding: 0 3px; margin: 0 1px; font-size: 8.6px; color: #24506f; }
+.dflt { color: #888; font-size: 8.4px; margin-left: 2px; }
+.notes { margin-top: 6px; background: #fff6f5; border-left: 3px solid #d9534f;
+         padding: 4px 8px; font-size: 9px; }
+.notes ul { margin: 2px 0 0 12px; padding: 0; }
+.notes li { margin-bottom: 2px; }
+.group { font-size: 11px; font-weight: 700; color: #7a8794; text-transform: uppercase;
+         letter-spacing: .08em; margin: 12px 0 5px; border-bottom: 1px solid #dde3e8;
+         padding-bottom: 2px; page-break-after: avoid; }
+.big { border: 1px solid #cfd8de; border-radius: 7px; padding: 9px 11px; margin-bottom: 10px;
+       background: #f7fafc; font-size: 10px; page-break-inside: avoid; }
+.big h2 { font-size: 13px; margin: 0 0 4px; color: #12304d; }
+.big code { font-family: "SF Mono", Menlo, monospace; background: #e6ebf0; padding: 0 3px;
+            border-radius: 3px; font-size: 9px; }
+.gotcha { page-break-inside: avoid; margin-bottom: 5px; }
+.gotcha b { color: #a3332f; }
+</style>
+<h1>Tomogration &mdash; pipeline reference</h1>
+<div class='sub'>Every command: what it reads, the exact filenames it looks for, what it writes and where. Generated from the app's own stage definitions.</div>
+<div class='legend'><b>Notation</b> &nbsp; <code>PositionNNN</code> = a tilt series &nbsp;&middot;&nbsp; <code>&lt;apx&gt;</code> = pixel size to TWO decimals (<code>--angpix 10</code> &rarr; <code>10.00Apx</code>) &nbsp;&middot;&nbsp; <code>&lt;processing&gt;</code> = <code>warp_tiltseries/</code> for a trunk run, or <code>jobs/J###/</code> for a job.</div>
+<div class='big'><h2>The job model &mdash; jobs/J###/</h2>
+Every run started from the CARD VIEW is a <b>job</b> with its own processing directory
+<code>jobs/J###/</code>. WarpTools' <code>--input_processing</code> / <code>--output_processing</code>
+(available on every command) redirect where a run READS its metadata and WRITES its results, so a job
+reads its parent's directory and writes its own. That is what lets two variants of the same step
+coexist instead of overwriting one another.<br><br>
+Bulk data (tilt stacks, raw movies) is resolved through the <code>.settings</code> file and is NOT
+duplicated — a branch only costs the per-series XML (~0.4 MB each). Products that a step genuinely
+creates (tomograms, subtomograms) live only in the job that made them.<br><br>
+<b>Trunk runs</b> (the classic &#9654; Run) skip all this and write to the shared conventional folders
+above. Both are fine; jobs are what you want when you're comparing variants.
+</div>
+<div class='group'>1. Data prep</div>
+
+<section class="card">
+  <h2>Rename EER + MDOC</h2>
+  <div class="cmd">bash ml_batch_rename_eer_mdoc_mrc_warp_auto.sh</div>
+  <p class="what-p">Renames Tomo5 beam-shift names (Position_1_2) to Warp form (Position001). Writes listfile_&lt;root&gt;.txt mapping old-&gt;new and fixes mdoc dates to yy-mmm-dd (required by Warp).</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: .</div>
+      <table><tr><td class="path">&lt;source_dir&gt;/*.eer</td><td class="what">raw movies from the microscope</td></tr><tr><td class="path">&lt;source_dir&gt;/*.mdoc</td><td class="what">one per tilt series (SerialEM/Tomo5)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: mdocs, frames</div>
+      <table><tr><td class="path">&lt;source_dir&gt;/PositionNNN_*.eer</td><td class="what">renamed in place</td></tr><tr><td class="path">&lt;source_dir&gt;/PositionNNN.mdoc</td><td class="what">renamed in place</td></tr><tr><td class="path">listfile_Position.txt</td><td class="what">map: original Tomo5 name -&gt; PositionNNN</td></tr></table>
+    </div>
+  </div>
+
+  
+  <div class="notes"><b>Watch out</b><ul><li>RENAME FIRST, then Sort files. The script globs *.mdoc + matching *.eer together in ONE folder; sorting first breaks that pairing.</li><li>*_override.mdoc files are quarantined to mdocs/bad/ (they would take bogus PositionNNN slots).</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>IMOD → Warp key</h2>
+  <div class="cmd">python ml_imodtowarpkey_generator_warp_auto.py</div>
+  <p class="what-p">Builds the IMOD-&gt;Warp tilt-number key. mdoc ZValue blocks are in dose-symmetric acquisition order; 3dmod shows tilts in angle order. The key translates between them.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: mdocs</div>
+      <table><tr><td class="path">mdocs/PositionNNN.mdoc</td><td class="what">one sample mdoc, for the tilt order</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: .</div>
+      <table><tr><td class="path">new_imod_conv_key.txt</td><td class="what">IMOD tilt-index -&gt; mdoc-section key</td></tr></table>
+    </div>
+  </div>
+
+  
+  <div class="notes"><b>Watch out</b><ul><li>Feeds remake_mdocs, which uses it to translate IMOD tilt numbers.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Inspect tilt stacks</h2>
+  <div class="cmd">(no command — an in-app tool)</div>
+  <p class="what-p">Visually review each tilt series (thumbnail grid + 3dmod) and mark bad tilts (IMOD #, ranges OK e.g. 1,4-12,48) or whole series for exclusion before remaking the mdocs.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: Thumbnails, mdocs</div>
+      <table><tr><td class="path">Thumbnails/*.mrc</td><td class="what">per-series montage (one per tilt series)</td></tr><tr><td class="path">mdocs/*.mdoc</td><td class="what">to list the series</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: mdocs</div>
+      <table><tr><td class="path">exclusion_list.txt</td><td class="what">manual section: `PositionNNN&lt;tab&gt;1,4-12`</td></tr><tr><td class="path">mdocs/bad/</td><td class="what">quarantined whole series (mdoc moved here)</td></tr><tr><td class="path">frames/bad/</td><td class="what">quarantined whole series (.eer moved here)</td></tr></table>
+    </div>
+  </div>
+
+  
+  <div class="notes"><b>Watch out</b><ul><li>A BARE `PositionNNN` line (no tilt numbers) = drop the WHOLE series.</li><li>Tilt ranges like `4-12` are expanded before remake_mdocs (its sed can't parse ranges).</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Remake MDOCs</h2>
+  <div class="cmd">bash ml_batch_remake_mdocs_warp_auto.sh</div>
+  <p class="what-p">Removes excluded tilts from mdocs and renumbers remaining ZValue blocks contiguously, then fixes mdoc date format.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: mdocs</div>
+      <table><tr><td class="path">mdocs/*.mdoc</td><td class="what">the series to rewrite</td></tr><tr><td class="path">exclusion_list.txt</td><td class="what">which tilts/series to drop</td></tr><tr><td class="path">new_imod_conv_key.txt</td><td class="what">IMOD -&gt; mdoc section mapping</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: mdocs</div>
+      <table><tr><td class="path">mdocs/PositionNNN.mdoc</td><td class="what">rewritten without the excluded tilts</td></tr></table>
+    </div>
+  </div>
+
+  
+  <div class="notes"><b>Watch out</b><ul><li>Needs ABSOLUTE paths (it cd's into mdocs/ and reads the lists by name).</li></ul></div>
+</section>
+<div class='group'>2. Gain</div>
+
+<section class="card">
+  <h2>Gain: convert</h2>
+  <div class="cmd">module load eman &amp;&amp; e2proc3d.py</div>
+  <p class="what-p">Converts a camera .gain reference to .mrc via EMAN2.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: gains</div>
+      <table><tr><td class="path">gains/&lt;name&gt;.gain</td><td class="what">the raw gain reference (name varies per dataset)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: gains</div>
+      <table><tr><td class="path">gains/original_gain.mrc</td><td class="what">gain as MRC</td></tr></table>
+    </div>
+  </div>
+
+  
+  <div class="notes"><b>Watch out</b><ul><li>The default `gains/original.gain` usually does NOT exist — the real gain file is auto-detected; check the name.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Gain: reciprocal</h2>
+  <div class="cmd">module load eman &amp;&amp; e2proc2d.py</div>
+  <p class="what-p">Computes the reciprocal gain that Linux WarpTools expects.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: gains</div>
+      <table><tr><td class="path">gains/original_gain.mrc</td><td class="what">from gain_convert</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: gains</div>
+      <table><tr><td class="path">gains/gain_reciprocal.mrc</td><td class="what">1/gain — this is what create_settings uses</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--process math.reciprocal</span><span class="dflt">on</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Linux WarpTools wants the reciprocal; using the plain gain double-applies the correction.</li></ul></div>
+</section>
+<div class='group'>3. Frameseries</div>
+
+<section class="card">
+  <h2>Frameseries settings</h2>
+  <div class="cmd">WarpTools create_settings</div>
+  <p class="what-p">Writes the Warp frame-series .settings file.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: frames, gains</div>
+      <table><tr><td class="path">frames/*.eer</td><td class="what">just to locate/describe the data</td></tr><tr><td class="path">gains/gain_reciprocal.mrc</td><td class="what">recorded as the gain path</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_frameseries</div>
+      <table><tr><td class="path">warp_frameseries.settings</td><td class="what">the frameseries settings file</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--folder_data</span><span class="dflt">frames</span> <span class="flag">--folder_processing</span><span class="dflt">warp_frameseries</span> <span class="flag">--output</span><span class="dflt">warp_frameseries.settings</span> <span class="flag">--extension</span><span class="dflt">*.eer</span> <span class="flag">--angpix</span><span class="dflt">1.57</span> <span class="flag">--gain_path</span><span class="dflt">gains/gain_reciprocal.mrc</span> <span class="flag">--exposure</span><span class="dflt">3.5</span> <span class="flag">--eer_ngroups</span><span class="dflt">10</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Writes NO per-movie data — it only records paths/pixel size/exposure.</li><li>--eer_ngroups IS the correct flag on this Warp 2.0 build.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Motion + CTF</h2>
+  <div class="cmd">WarpTools fs_motion_and_ctf</div>
+  <p class="what-p">Per-frame-series motion correction + CTF estimation.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: frames, warp_frameseries</div>
+      <table><tr><td class="path">frames/*.eer</td><td class="what">the raw movies</td></tr><tr><td class="path">warp_frameseries.settings</td><td class="what">paths, angpix, gain, exposure</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_frameseries</div>
+      <table><tr><td class="path">warp_frameseries/&lt;movie&gt;.xml</td><td class="what">per-movie motion + CTF metadata</td></tr><tr><td class="path">warp_frameseries/average/&lt;movie&gt;.mrc</td><td class="what">aligned average (--out_averages)</td></tr><tr><td class="path">warp_frameseries/averagehalves/</td><td class="what">half-averages (--out_average_halves)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_frameseries.settings</span> <span class="flag">--m_grid</span><span class="dflt">1x1x3</span> <span class="flag">--c_grid</span><span class="dflt">2x2x1</span> <span class="flag">--m_range_min</span><span class="dflt">500</span> <span class="flag">--m_range_max</span><span class="dflt">10</span> <span class="flag">--m_bfac</span><span class="dflt">-500</span> <span class="flag">--c_range_max</span><span class="dflt">7</span> <span class="flag">--c_defocus_max</span><span class="dflt">8</span> <span class="flag">--out_averages</span><span class="dflt">on</span> <span class="flag">--out_average_halves</span><span class="dflt">on</span> <span class="flag">--device_list</span><span class="dflt">0</span> <span class="flag">--perdevice</span><span class="dflt">2</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>MUST pass --out_averages (and --out_average_halves). Without them no aligned averages are written and ts_import fails for EVERY series with 'does not have an aligned average result'.</li><li>Idempotent: re-running skips movies that already have XML.</li></ul></div>
+</section>
+<div class='group'>4. Tilt series</div>
+
+<section class="card">
+  <h2>Tilt-series settings</h2>
+  <div class="cmd">WarpTools create_settings</div>
+  <p class="what-p">Writes the Warp tilt-series .settings file.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: mdocs</div>
+      <table><tr><td class="path">(nothing yet — tomostar/ may be empty)</td><td class="what"></td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_tiltseries</div>
+      <table><tr><td class="path">warp_tiltseries.settings</td><td class="what">the tilt-series settings file</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--folder_data</span><span class="dflt">tomostar</span> <span class="flag">--folder_processing</span><span class="dflt">warp_tiltseries</span> <span class="flag">--output</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--extension</span><span class="dflt">*.tomostar</span> <span class="flag">--angpix</span><span class="dflt">1.57</span> <span class="flag">--gain_path</span><span class="dflt">gains/gain_reciprocal.mrc</span> <span class="flag">--exposure</span><span class="dflt">3.5</span> <span class="flag">--tomo_dimensions</span><span class="dflt">4096x4096x3088</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Run BEFORE ts_import. Seeing '0 files found / tomostar not found' here is EXPECTED — tomostar/ doesn't exist yet.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Import tilt series</h2>
+  <div class="cmd">WarpTools ts_import</div>
+  <p class="what-p">Builds .tomostar files by pairing mdocs with frameseries.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: mdocs, warp_frameseries</div>
+      <table><tr><td class="path">mdocs/*.mdoc</td><td class="what">tilt angles, order, exposure</td></tr><tr><td class="path">warp_frameseries/&lt;movie&gt;.xml</td><td class="what">the per-movie results + aligned averages</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: tomostar, warp_tiltseries</div>
+      <table><tr><td class="path">tomostar/PositionNNN.tomostar</td><td class="what">one per tilt series — the item list</td></tr><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">per-series metadata (created here)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--mdocs</span><span class="dflt">mdocs</span> <span class="flag">--frameseries</span><span class="dflt">warp_frameseries</span> <span class="flag">--tilt_exposure</span><span class="dflt">3.5</span> <span class="flag">--min_intensity</span><span class="dflt">0</span> <span class="flag">--dont_invert</span><span class="dflt">on</span> <span class="flag">--output</span><span class="dflt">tomostar</span> <span class="flag">--override_axis</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>CANNOT be scoped with --input_data (only --mdocs / --pattern), which is why subset work uses a separate project folder.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Build tilt stacks</h2>
+  <div class="cmd">WarpTools ts_stack</div>
+  <p class="what-p">Builds aligned tilt stacks (.st) per tilt series for AreTomo.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries, tomostar</div>
+      <table><tr><td class="path">tomostar/*.tomostar</td><td class="what">the series</td></tr><tr><td class="path">warp_frameseries/average/*.mrc</td><td class="what">the aligned averages</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_tiltseries/tiltstack</div>
+      <table><tr><td class="path">warp_tiltseries/tiltstack/PositionNNN/PositionNNN.st</td><td class="what">the tilt stack</td></tr><tr><td class="path">warp_tiltseries/tiltstack/PositionNNN/*.rawtlt</td><td class="what">tilt angles</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--angpix</span> <span class="flag">--device_list</span><span class="dflt">0</span> <span class="flag">--perdevice</span><span class="dflt">2</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Run ts_import first; a missing mdoc entry stalls a stack.</li></ul></div>
+</section>
+<div class='group'>5. Alignment</div>
+
+<section class="card">
+  <h2>Align (AreTomo2)</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Marker-free tilt-series alignment (+optional recon). Writes .xf/.tlt per series under &lt;output&gt;/Imod/.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries/tiltstack</div>
+      <table><tr><td class="path">warp_tiltseries/tiltstack/*/*.st</td><td class="what">the tilt stacks</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: aretomo_output</div>
+      <table><tr><td class="path">aretomo_output[-vN]/PositionNNN/</td><td class="what">per-series AreTomo output</td></tr><tr><td class="path">aretomo_output[-vN]/Imod/PositionNNN/PositionNNN.xf</td><td class="what">the ALIGNMENT — this is the only thing Warp needs</td></tr><tr><td class="path">aretomo_output[-vN]/PARAMETERS.txt</td><td class="what">what was run</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">ARETOMO_GPUS</span><span class="dflt">0 1 2 3</span> <span class="flag">ARETOMO_JOBS_PER_GPU</span><span class="dflt">1</span> <span class="flag">ARETOMO_ALIGNZ</span><span class="dflt">670</span> <span class="flag">ARETOMO_VOLZ</span><span class="dflt">3088</span> <span class="flag">ARETOMO_OUTBIN</span><span class="dflt">8</span> <span class="flag">ARETOMO_DARKTOL</span><span class="dflt">0.000001</span> <span class="flag">ARETOMO_TILTCOR</span><span class="dflt">0</span> <span class="flag">ARETOMO_FLIPVOLZ</span><span class="dflt">1</span> <span class="flag">ARETOMO_WBP</span><span class="dflt">1</span> <span class="flag">ARETOMO_TILTAXIS</span> <span class="flag">ARETOMO_PATCH</span> <span class="flag">ARETOMO_ALIGN</span><span class="dflt">1</span> <span class="flag">ARETOMO_BIN</span><span class="dflt">/ceph/groups/structbio/Programs/AreTomo2/AreTomo2</span> <span class="flag">ARETOMO_CUDA_LIB</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Auto-VERSIONS: each run makes a NEW aretomo_output-vN folder. A killed run leaves a PARTIAL folder — a later version can have FEWER .xf than an earlier one. Check: for d in aretomo_output*; do echo "$d: $(find $d -name '*.xf'|wc -l)"; done</li><li>Set ARETOMO_VOLZ=0 for ALIGNMENT-ONLY (skips the slow tomogram; you only need the .xf).</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Refine alignment (train)</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Deep-learning REFINEMENT of an EXISTING alignment by TRAINING a model on this set (warpem/miss-alignment). Does NOT align raw stacks — the docs state &#x27;miss-alignment starts from an initially coarse aligned dataset&#x27;, so coarse-align FIRST (AreTomo → ts_import_alignments).</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries, warp_tiltseries/tiltstack</div>
+      <table><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">reads AND REWRITES these in place</td></tr><tr><td class="path">warp_tiltseries/tiltstack/</td><td class="what">the stacks</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_tiltseries</div>
+      <table><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">refined alignment written back in place</td></tr><tr><td class="path">warp_tiltseries/models/</td><td class="what">the trained model checkpoints</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">MA_TRAINING_DEVICES</span><span class="dflt">0</span> <span class="flag">MA_RECON_DEVICES</span><span class="dflt">0,0,0</span> <span class="flag">MA_DATALOADERS</span><span class="dflt">5</span> <span class="flag">MA_POOL_SIZE</span><span class="dflt">2000</span> <span class="flag">MA_START_ITER</span> <span class="flag">MA_PREPARE_STACKS</span><span class="dflt">10.0</span> <span class="flag">MA_CONDA_ENV</span><span class="dflt">miss-alignment</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>REFINES an existing coarse alignment — it CANNOT align raw stacks. Run AreTomo -> ts_import_alignments -> select FIRST, or you get a featureless tomogram.</li><li>MA_TRAINING_DEVICES must be a SINGLE GPU. Speed comes from MA_RECON_DEVICES.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Refine alignment (infer)</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Reuse a model trained by &#x27;miss-alignment (train)&#x27; to align THIS (usually larger) dataset with NO retraining — runs &#x27;miss-alignment infer&#x27;, loading iterN/model.ckpt for each iteration.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries, warp_tiltseries/tiltstack</div>
+      <table><tr><td class="path">&lt;MA_MODEL_RUN_DIR&gt;/iterN/model.ckpt</td><td class="what">models from a finished training run</td></tr><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">reads AND rewrites in place</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_tiltseries</div>
+      <table><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">refined alignment, no training</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">MA_MODEL_RUN_DIR</span> <span class="flag">MA_INFER_DEVICES</span><span class="dflt">0,1,2,3</span> <span class="flag">MA_START_ITER</span> <span class="flag">MA_PREPARE_STACKS</span><span class="dflt">10.0</span> <span class="flag">MA_CONDA_ENV</span><span class="dflt">miss-alignment</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>The larger set still needs its OWN coarse alignment imported first.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Import alignments</h2>
+  <div class="cmd">WarpTools ts_import_alignments</div>
+  <p class="what-p">Imports AreTomo .xf/.tlt alignments back into Warp.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: aretomo_output, warp_tiltseries</div>
+      <table><tr><td class="path">aretomo_output[-vN]/Imod/PositionNNN/PositionNNN.xf</td><td class="what">AreTomo&#x27;s alignment</td></tr><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">the series to update</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_tiltseries</div>
+      <table><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">tilt axis + shifts written INTO the xml</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--alignments</span><span class="dflt">aretomo_output/Imod/</span> <span class="flag">--alignment_angpix</span><span class="dflt">1.57</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Points at the NEWEST aretomo_output*/Imod/ by default. If that run was killed it may be INCOMPLETE -> 'Could not find PositionNNN.xf' for most series. Type a specific version (e.g. aretomo_output-v2/Imod/) to override.</li><li>A FAILED import DESELECTS every failed series. Re-enable with sync_selection -> Select.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Sync selection</h2>
+  <div class="cmd">WarpTools change_selection</div>
+  <p class="what-p">Deselects tilt series with no AreTomo alignment so ts_reconstruct won&#x27;t crash trying to reconstruct them.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries</div>
+      <table><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">the selection flag lives here</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_tiltseries</div>
+      <table><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">sets selected/deselected in place</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--input_data</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>ANY failed per-item run DESELECTS that item, and downstream steps then SILENTLY SKIP it. After any partial failure, run this with --select.</li><li>WarpTools needs EXACTLY ONE mode flag (--select / --deselect / ...).</li></ul></div>
+</section>
+<div class='group'>6. CTF</div>
+
+<section class="card">
+  <h2>Defocus handedness</h2>
+  <div class="cmd">WarpTools ts_defocus_hand</div>
+  <p class="what-p">Checks (and optionally flips) defocus handedness. Exactly one mode runs per invocation.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries</div>
+      <table><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">CTF fits</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_tiltseries</div>
+      <table><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">sets the defocus handedness</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Run --check first; only then --set_*. Exactly ONE mode flag.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>CTF estimation</h2>
+  <div class="cmd">WarpTools ts_ctf</div>
+  <p class="what-p">Per-tilt CTF refinement across each series.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries, warp_tiltseries/tiltstack</div>
+      <table><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">series metadata</td></tr><tr><td class="path">warp_tiltseries/tiltstack/*/*.st</td><td class="what">the stacks to fit</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_tiltseries</div>
+      <table><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">CTF written INTO the xml: &lt;CTF&gt;&lt;Param Name=&quot;Defocus&quot;&gt; (per-series mean, um), DefocusDelta/DefocusAngle (astigmatism), and &lt;GridCTF&gt; (per-TILT defocus, one Node per tilt)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--range_high</span><span class="dflt">7</span> <span class="flag">--defocus_max</span><span class="dflt">8</span> <span class="flag">--device_list</span><span class="dflt">0</span> <span class="flag">--perdevice</span><span class="dflt">2</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>No new files — it EDITS the per-series xml in place.</li></ul></div>
+</section>
+<div class='group'>7. Reconstruct</div>
+
+<section class="card">
+  <h2>Tomogram reconstruction</h2>
+  <div class="cmd">WarpTools ts_reconstruct</div>
+  <p class="what-p">Back-projects aligned, CTF-corrected tilts into 3D tomograms.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries</div>
+      <table><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">alignment + CTF</td></tr><tr><td class="path">warp_tiltseries/tiltstack/*/*.st</td><td class="what">the stacks</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_tiltseries/reconstruction</div>
+      <table><tr><td class="path">warp_tiltseries/reconstruction/PositionNNN_&lt;apx&gt;Apx.mrc</td><td class="what">the full tomogram, e.g. Position042_12.56Apx.mrc</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--angpix</span><span class="dflt">10</span> <span class="flag">--device_list</span><span class="dflt">0</span> <span class="flag">--perdevice</span><span class="dflt">1</span> <span class="flag">--deconv</span> <span class="flag">--dont_invert</span><span class="dflt">on</span></div>
+  <div class="notes"><b>Watch out</b><ul><li><apx> is the pixel size to TWO DECIMALS: --angpix 10 -> '10.00Apx'.</li><li>Leaving --angpix blank means NATIVE (1.57 A) -> ~260x the volume, tens of GB and ~40 min EACH. Use ~10 A for viewing/picking.</li><li>Needs WARP_FORCE_MRC_FLOAT32=1 for IMOD/3dmod to read the output.</li></ul></div>
+</section>
+<div class='group'>8. Pick</div>
+
+<section class="card">
+  <h2>Template matching</h2>
+  <div class="cmd">WarpTools ts_template_match</div>
+  <p class="what-p">CTF-aware template matching to locate particles (apoferritin example values — adapt per target).</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries/reconstruction</div>
+      <table><tr><td class="path">warp_tiltseries/reconstruction/PositionNNN_&lt;apx&gt;Apx.mrc</td><td class="what">the FULL TOMOGRAM at --tomo_angpix. It REUSES this; it does not rebuild it.</td></tr><tr><td class="path">warp_tiltseries/template/emd_&lt;code&gt;.mrc</td><td class="what">the template (auto-downloaded by --template_emdb) or your --template_path</td></tr><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">alignment + CTF</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_tiltseries/matching</div>
+      <table><tr><td class="path">warp_tiltseries/matching/PositionNNN_&lt;apx&gt;Apx&lt;SUFFIX&gt;.star</td><td class="what">THE PEAK LIST. &lt;SUFFIX&gt; = --override_suffix verbatim if set, else the template-derived name (_emd_70905 / _&lt;template stem&gt;)</td></tr><tr><td class="path">warp_tiltseries/matching/PositionNNN_&lt;apx&gt;Apx&lt;TEMPLATE&gt;_corr.mrc</td><td class="what">correlation volume — named after the TEMPLATE, NOT your override_suffix</td></tr><tr><td class="path">warp_tiltseries/matching/PositionNNN_&lt;apx&gt;Apx&lt;TEMPLATE&gt;_angleid.mrc</td><td class="what">best-orientation map (same template-based naming)</td></tr><tr><td class="path">warp_tiltseries/template/emd_&lt;code&gt;.mrc</td><td class="what">the downloaded EMDB map</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--tomo_angpix</span><span class="dflt">10</span> <span class="flag">--template_emdb</span> <span class="flag">--template_path</span> <span class="flag">--override_suffix</span> <span class="flag">--subdivisions</span><span class="dflt">3</span> <span class="flag">--template_diameter</span> <span class="flag">--symmetry</span><span class="dflt">C1</span> <span class="flag">--whiten</span><span class="dflt">on</span> <span class="flag">--optimize_poses</span> <span class="flag">--check_hand</span><span class="dflt">2</span> <span class="flag">--npeaks</span><span class="dflt">2000</span> <span class="flag">--peak_distance</span> <span class="flag">--max_missing_tilts</span><span class="dflt">2</span> <span class="flag">--subvolume_size</span><span class="dflt">192</span> <span class="flag">--device_list</span> <span class="flag">--perdevice</span><span class="dflt">1</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>--tomo_angpix MUST equal an --angpix you ALREADY ran ts_reconstruct at, or every series fails with 'A reconstruction at the desired resolution was not found.'</li><li>--override_suffix renames ONLY the .star. The _corr.mrc / _angleid.mrc keep the TEMPLATE name — so a viewer needs -mp '*<suffix>.star' but -cvp '*<template>_corr.mrc'.</li><li>--check_hand > 0 is INCOMPATIBLE with --override_suffix: the handedness test reads back the DEFAULT template-named star and dies. Use check_hand 0 with a suffix; determine handedness once WITHOUT one.</li><li>--npeaks (default 2000) is a HARD per-series CAP. If every series returns exactly that many, you are capped and losing particles.</li><li>--subvolume_size is the matching TILE in TOMOGRAM pixels; it is NOT the particle box and NOT a big speed lever. Cost is driven by --subdivisions (orientations).</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Threshold picks</h2>
+  <div class="cmd">WarpTools threshold_picks</div>
+  <p class="what-p">Keeps picks above a normalised score threshold; writes *&lt;out_suffix&gt;.star.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries/matching</div>
+      <table><tr><td class="path">&lt;processing&gt;/matching/PositionNNN_&lt;in_suffix&gt;.star</td><td class="what">the peak list from template matching</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: warp_tiltseries/matching</div>
+      <table><tr><td class="path">&lt;processing&gt;/matching/PositionNNN_&lt;in_suffix&gt;_&lt;out_suffix&gt;.star</td><td class="what">the kept picks, written NEXT TO the input (same dir)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--in_suffix</span> <span class="flag">--out_suffix</span><span class="dflt">clean</span> <span class="flag">--minimum</span><span class="dflt">3</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>--in_suffix is a LITERAL string, NOT a glob, and must NOT include '.star'. Warp builds the name as {item}_{in_suffix}.star. Passing '*.star' searches for 'PositionNNN_*.star.star' and fails for every series.</li><li>Find the right value: ls warp_tiltseries/matching/ and take what sits between 'PositionNNN_' and '.star' (e.g. 12.56Apx_emd_70905).</li><li>It reads its input from the OUTPUT processing dir (it augments a matching dir in place) — which is why a job must have its parent's stars staged into its own matching/ folder.</li><li>Scores are background-normalised, so one --minimum is comparable across tomograms — but NOT across runs with different settings (whitening shifts the scale).</li></ul></div>
+</section>
+<div class='group'>9. Export</div>
+
+<section class="card">
+  <h2>Export particles</h2>
+  <div class="cmd">WarpTools ts_export_particles</div>
+  <p class="what-p">Extracts CTF-corrected particles into a RELION project dir — a particles star (+ optimisation_set.star for RELION 5).</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries, warp_tiltseries/matching</div>
+      <table><tr><td class="path">--input_directory + --input_pattern</td><td class="what">e.g. warp_tiltseries/matching + &#x27;*12.56Apx_v3-optimized_clean.star&#x27;. NOTE: the pick STARs come from --input_directory, NOT --input_processing.</td></tr><tr><td class="path">warp_tiltseries/PositionNNN.xml</td><td class="what">alignment + CTF, to reconstruct subtomos</td></tr><tr><td class="path">warp_tiltseries/tiltstack/</td><td class="what">the tilt data</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: relion4/warp</div>
+      <table><tr><td class="path">&lt;output_processing&gt;/subtomo/*.mrc</td><td class="what">ONE 3D SUBTOMOGRAM PER PARTICLE — this is the bulk (box^3 x 4 bytes each)</td></tr><tr><td class="path">&lt;output_star&gt;</td><td class="what">the particles STAR RELION will read, e.g. relion4/&lt;tag&gt;/matching.star</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--input_directory</span><span class="dflt">warp_tiltseries/matching</span> <span class="flag">--input_pattern</span><span class="dflt">*clean.star</span> <span class="flag">--output_star</span><span class="dflt">relion4/warp/matching.star</span> <span class="flag">--output_processing</span><span class="dflt">relion4/warp</span> <span class="flag">--output_angpix</span><span class="dflt">4</span> <span class="flag">--box</span><span class="dflt">64</span> <span class="flag">--diameter</span> <span class="flag">--normalized_coords</span><span class="dflt">on</span> <span class="flag">--relative_output_paths</span><span class="dflt">on</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Needs EXACTLY ONE of --3d (RELION 4 subtomograms) or --2d (RELION 5 --tomo).</li><li>Image paths in the STAR are RELATIVE to --output_processing, so RELION MUST be launched from that directory or every path is wrong.</li><li>Size check: 578k particles at box 48 ~ 250 GB of subtomograms. Check disk before a big export.</li></ul></div>
+</section>
+<div class='group'>10. RELION 4</div>
+
+<section class="card">
+  <h2>RELION 4: convert STAR</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Converts the Warp ts_export_particles star to RELION 4 format and builds a de-novo initial reference. Rewrites the relative &#x27;subtomo/&#x27; particle paths to absolute (so RELION finds every subtomogram), runs relion_convert_star, then samples NREF random particles and relion_reconstructs random_subset_ref.mrc.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: relion4/warp</div>
+      <table><tr><td class="path">&lt;project_dir&gt;/&lt;starfile&gt;</td><td class="what">the Warp export STAR (e.g. matching.star)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: relion4/warp</div>
+      <table><tr><td class="path">&lt;project_dir&gt;/&lt;stem&gt;_conv.star</td><td class="what">THE RELION-4-FORMAT PARTICLES STAR — this is what you feed RELION</td></tr><tr><td class="path">&lt;project_dir&gt;/random_subset_ref.mrc</td><td class="what">de-novo initial reference from NREF random particles, already at the particles&#x27; box + pixel size</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">RELION_MODULE</span><span class="dflt">relion/4.0.1</span> <span class="flag">PARTICLEDIR</span> <span class="flag">PATH_MATCH</span><span class="dflt">subtomo/</span> <span class="flag">CS</span><span class="dflt">2.7</span> <span class="flag">Q0</span><span class="dflt">0.07</span> <span class="flag">NREF</span><span class="dflt">1000</span> <span class="flag">MAKE_REF</span><span class="dflt">1</span> <span class="flag">--execute</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>It rewrites the 'subtomo/' path prefix in the STAR to an ABSOLUTE path so RELION can resolve every subtomogram.</li><li>DRY-RUN by default — tick execute to actually convert.</li><li>In the RELION GUI, 'Input images STAR file' = the _conv.star, NOT the raw Warp matching.star.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>RELION 4: Class3D</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Hands the exported subtomograms to RELION 4 for 3D classification — asserts the export is complete, checks the launch-root path invariant, pre-scales the reference, cleans the project dir, and submits Class3D.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: relion4/warp</div>
+      <table><tr><td class="path">&lt;project_dir&gt;/&lt;particles&gt;</td><td class="what">the CONVERTED star (matching_conv.star)</td></tr><tr><td class="path">REF_MAP</td><td class="what">your reference .mrc (EMDB map or random_subset_ref.mrc)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: relion4/warp</div>
+      <table><tr><td class="path">&lt;project_dir&gt;/Class3D/job001/run_itNNN_classNNN.mrc</td><td class="what">the class volumes</td></tr><tr><td class="path">&lt;project_dir&gt;/Class3D/job001/run_itNNN_data.star</td><td class="what">particle assignments</td></tr><tr><td class="path">&lt;project_dir&gt;/ref_&lt;angpix&gt;apx_box&lt;box&gt;.mrc</td><td class="what">the RE-SCALED reference</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">RELION_MODULE</span><span class="dflt">relion/4.0.1</span> <span class="flag">REF_MAP</span> <span class="flag">REF_ANGPIX</span> <span class="flag">OUTPUT_ANGPIX</span><span class="dflt">4</span> <span class="flag">BOX</span><span class="dflt">64</span> <span class="flag">DIAMETER</span> <span class="flag">SYMMETRY</span><span class="dflt">C1</span> <span class="flag">NCLASSES</span><span class="dflt">4</span> <span class="flag">GPUS</span><span class="dflt">0,1,2,3</span> <span class="flag">--execute</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>RELION 4 does NOT auto-rescale the reference. OUTPUT_ANGPIX and BOX must match the export, and the script pre-scales REF_MAP with relion_image_handler.</li><li>Runs relion_refine_mpi FROM <project_dir>. Do NOT also drive the same dir from the RELION GUI — pick one.</li><li>MPI = #GPUs + 1. GPUs are colon-separated for RELION (0:1:2:3).</li></ul></div>
+</section>
+<div class='group'>Cross-cutting gotchas</div><div class='big'>
+<div class='gotcha'><b>A failed item is SILENTLY DESELECTED</b> &mdash; Any per-item failure marks that series unselected <i>in its .xml</i>, and every downstream step then skips it without saying so. After ANY partial failure run <code>WarpTools change_selection --settings warp_tiltseries.settings --select</code>.</div>
+<div class='gotcha'><b>Pixel sizes are formatted to 2 decimals</b> &mdash; <code>--angpix 10</code> produces <code>..._10.00Apx.mrc</code>. Template matching's <code>--tomo_angpix</code> must match an existing reconstruction EXACTLY.</div>
+<div class='gotcha'><b>Suffixes are how parallel pick sets coexist</b> &mdash; One matching/ directory holds many pick sets, told apart only by the suffix in the filename. <code>--override_suffix</code> names the STAR; the corr/angleid volumes keep the TEMPLATE name.</div>
+<div class='gotcha'><b>in_suffix / input_pattern are different things</b> &mdash; <code>threshold_picks --in_suffix</code> is a LITERAL string with no <code>.star</code> and no wildcard. <code>ts_export_particles --input_pattern</code> IS a glob and DOES include <code>.star</code>.</div>
+<div class='gotcha'><b>GPU list formats differ per tool</b> &mdash; WarpTools/AreTomo want SPACES (<code>0 1 2 3</code>); RELION wants COLONS (<code>0:1:2:3</code>); miss-alignment wants COMMAS (<code>0,1,2,3</code>). Tomogration normalises these for you.</div>
+</div>
