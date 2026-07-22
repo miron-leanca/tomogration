@@ -53,4 +53,11 @@ if ! "$PYTHON" -c "import PySide6" >/dev/null 2>&1; then
 fi
 
 add_local_libs      # after setup, so a first run picks up the freshly-fetched ./libs
+
+# Don't load Qt's GNOME platform theme plugin. On VMs without a running
+# xdg-desktop-portal it spams "No such interface org.freedesktop.portal.Settings"
+# on every launch, and we gain nothing from it: the app pins its own Fusion style
+# and dark palette, and already asks for non-native file dialogs.
+export QT_QPA_PLATFORMTHEME=""
+
 exec "$PYTHON" "$SCRIPT_DIR/tomogration_app.py" "$@"

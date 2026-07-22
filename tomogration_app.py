@@ -41,6 +41,7 @@ import array as _array
 from PySide6.QtCore import Qt, QObject, QEvent, Signal, QProcess, QTimer
 from PySide6.QtGui import (
     QBrush, QColor, QImage, QPixmap, QTextCursor, QFont, QPen, QPainter,
+    QPalette,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
@@ -1877,14 +1878,17 @@ STAGES = [
             {"name": "input_pattern", "kind": "text", "flag": "--input_pattern",
              "default": "*clean.star", "help": "Glob for thresholded pick star files."},
             {"name": "output_star", "kind": "text", "flag": "--output_star",
-             "default": "relion4/warp/matching.star",
+             "default": "relion4/{jobid}/matching.star",
              "help": "Output star path. Put it INSIDE the RELION project dir "
-             "(output_processing) — RELION must later be launched from that dir."},
+             "(output_processing) — RELION must later be launched from that dir. "
+             "{jobid} resolves to this job's id so runs never collide."},
             {"name": "output_processing", "kind": "text", "flag": "--output_processing",
-             "default": "relion4/warp",
+             "default": "relion4/{jobid}",
              "help": "RELION project/export dir. The subtomo image paths in the star are "
              "written RELATIVE to this, so you MUST launch RELION from here (the recurring "
-             "'file does not exist' bug is launching from the wrong dir)."},
+             "'file does not exist' bug is launching from the wrong dir). Default "
+             "relion4/{jobid} gives each export its own dir; Build-downstream from a "
+             "pick-set card instead names it after the pick set (relion4/<tag>)."},
             {"name": "output_angpix", "kind": "text", "flag": "--output_angpix",
              "default": "4", "help": "Export pixel size (Å). Choose so Nyquist sits just "
              "below feature resolution."},
@@ -2228,8 +2232,8 @@ STAGE_OUTPUTS = {
     "ts_import_alignments": "warp_tiltseries", "ts_ctf": "warp_tiltseries",
     "ts_reconstruct": "warp_tiltseries/reconstruction",
     "ts_template_match": "warp_tiltseries/matching",
-    "threshold_picks": "warp_tiltseries/matching", "ts_export_particles": "relion4/warp",
-    "relion4_convert": "relion4/warp", "relion4_class3d": "relion4/warp",
+    "threshold_picks": "warp_tiltseries/matching", "ts_export_particles": "relion4",
+    "relion4_convert": "relion4", "relion4_class3d": "relion4",
 }
 
 # Which mockup column each stage group belongs to (the three job-list panels).
@@ -2496,6 +2500,11 @@ def build_job_command(spec, job, store, warp_cmd=None, group_inputs=None):
     extra = io_flags_for_job(spec, job, store)
     if extra and "--output_processing" not in cmd and "--input_processing" not in cmd:
         cmd = f"{cmd} {extra}"
+    # {jobid} in any param resolves to THIS job's id, so a stage whose output must
+    # live outside jobs/ (the RELION handoff needs one project dir with the star +
+    # subtomo/) still gets a per-job, collision-free home: relion4/{jobid} ->
+    # relion4/J13. No shared default for a second run to overwrite.
+    cmd = cmd.replace("{jobid}", job.get("id", ""))
     return cmd
 
 
@@ -2620,6 +2629,9 @@ def derive_child_params(child_stage, parent_stage, parent_params, parent_output_
                 "output_processing": outdir, "output_star": f"{outdir}/matching.star"}
     if child_stage == "relion4_convert" and parent_stage == "ts_export_particles":
         outdir = parent_params.get("output_processing", "relion4/warp")
+        # resolve the export's {jobid} to its concrete id so convert runs in the
+        # SAME dir the export wrote to (relion4/J13), not convert's own job id.
+        outdir = outdir.replace("{jobid}", os.path.basename(parent_output_dir or ""))
         return {"project_dir": outdir,
                 "starfile": os.path.basename(parent_params.get("output_star", "matching.star"))}
     if child_stage == "relion4_class3d" and parent_stage == "relion4_convert":
@@ -4298,6 +4310,7 @@ class Tomogration(QMainWindow):
         tools.addAction("AreTomo runs", self._open_aretomo_versions)
         tools.addAction("Open file…", self._open_file_in_editor)
         tools.addAction("ChimeraX…", self._launch_chimerax)
+        tools.addAction("Convert crYOLO picks…", self._convert_cryolo_picks)
         tools.addSeparator()
         tools.addAction("Set WarpTools launch command…", self._set_warp_launch)
         tools.addAction("Set warp-tm-vis launch command…", self._set_tm_vis_launch)
@@ -4651,6 +4664,95 @@ class Tomogration(QMainWindow):
             return 1
         except OSError:
             return 0
+
+    def _convert_cryolo_picks(self):
+        """Tools ▶ Convert crYOLO picks: turn a crYOLO tomo-picking COORDS/ folder
+        into normalised per-tomogram Warp pick STARs (via
+        ml_cryolo_to_warp_picks_auto.py) and register them as a COMPLETED pick-set
+        job card — shaped exactly like an adopted template-match set, so
+        'Build downstream ▶ ts_export_particles' extracts straight off the crYOLO
+        picks. crYOLO stands in for ts_template_match + threshold_picks; everything
+        downstream is unchanged."""
+        if not self.project_root:
+            QMessageBox.warning(self, "No project", "Open a project root first.")
+            return
+        root = Path(self.project_root)
+        # 1. gather inputs with standard dialogs (no new widgets to get wrong).
+        coords = QFileDialog.getExistingDirectory(
+            self, "crYOLO COORDS/ folder", str(root), NONATIVE_DIR)
+        if not coords:
+            return
+        recon_default = root / "warp_tiltseries" / "reconstruction"
+        recon = QFileDialog.getExistingDirectory(
+            self, "Reconstruction folder crYOLO picked on",
+            str(recon_default if recon_default.is_dir() else root), NONATIVE_DIR)
+        if not recon:
+            return
+        apx, ok = QInputDialog.getText(
+            self, "Pixel-size tag", "Reconstruction angpix tag in the filenames "
+            "(PositionNNN_<apx>Apx.mrc):", text="12.56")
+        if not ok or not apx.strip():
+            return
+        tag, ok = QInputDialog.getText(
+            self, "Pick-set name", "Short tag for this pick set "
+            "(files become *_<apx>Apx_<tag>.star):", text="cryolo")
+        if not ok or not tag.strip():
+            return
+        apx, tag = apx.strip(), tag.strip()
+        flip_y = QMessageBox.question(
+            self, "Mirror Y?",
+            "Mirror the Y axis (y → 1 − y)?\n\nChoose No unless a prior one-tomogram "
+            "check showed crYOLO picks come out Y-flipped versus the tomogram.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+        # 2. create the pick-set card FIRST, so the converter writes into its dir.
+        #    Params mirror an adopted template-match set: match_star_infix(params) =
+        #    '<apx>Apx_<tag>', which is both the file infix and the export pattern.
+        params = {"override_suffix": f"_{tag}", "tomo_angpix": apx}
+        job = new_job(self.project_root, "ts_template_match",
+                      f"crYOLO picks '{tag}'", params, inputs={})
+        dst = root / job["output_dir"] / "matching"
+        try:
+            dst.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            delete_job(self.project_root, job["id"])
+            QMessageBox.critical(self, "Convert crYOLO picks", f"Cannot make {dst}: {e}")
+            return
+
+        # 3. run the converter into the card's matching dir.
+        script = Path(__file__).resolve().parent / "ml_cryolo_to_warp_picks_auto.py"
+        cmd = [sys.executable, str(script), coords, recon,
+               "--out_dir", str(dst), "--apx", apx, "--suffix", tag, "--execute"]
+        if flip_y:
+            cmd.append("--flip_y")
+        self._log("Convert crYOLO picks: " + " ".join(cmd), "info")
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except (OSError, subprocess.SubprocessError) as e:
+            delete_job(self.project_root, job["id"])
+            QMessageBox.critical(self, "Convert crYOLO picks", f"Converter failed: {e}")
+            return
+        out = (res.stdout or "") + (res.stderr or "")
+        n = len(list(dst.glob(f"*_{apx}Apx_{tag}.star")))
+        if res.returncode != 0 or n == 0:
+            delete_job(self.project_root, job["id"])
+            QMessageBox.critical(
+                self, "Convert crYOLO picks",
+                f"No pick STARs written (exit {res.returncode}).\n\n{out[-3000:]}")
+            return
+
+        # 4. mark completed — now it wires into the DAG like any adopted pick set.
+        update_job(self.project_root, job["id"], status="completed", exit_code=0,
+                   orphan_suffix=f"_{tag}", summary={"series": n},
+                   finished=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        self._log(f"crYOLO picks '{tag}' → {job['id']} ({n} tomograms) in "
+                  f"{job['output_dir']}/matching.", "ok")
+        self._refresh_canvas()
+        QMessageBox.information(
+            self, "Convert crYOLO picks",
+            f"Registered {n} tomograms as pick-set job {job['id']}.\n\n"
+            f"Right-click the card ▶ Build downstream from this ▶ ts_export_particles "
+            f"to extract. Turn --normalized_coords ON in the export step.\n\n{out[-1500:]}")
 
     def _card_menu(self, node, global_pos):
         """Right-click menu on a canvas card."""
@@ -6366,8 +6468,42 @@ def ask_project_root(parent, start):
                             f"Not a directory:\n{text}\n\nCheck the path and try again.")
 
 
+def apply_dark_theme(app):
+    """Pin the look to Fusion + an explicit dark palette.
+
+    Every colour this app hardcodes in a stylesheet (#888 labels, #ececec
+    titles, #0e0e0e cards) assumes a dark background. Widgets we do NOT style —
+    buttons, line edits, combos, scrollbars, menus, dialogs — otherwise take
+    their colours from the desktop theme, so on a machine whose theme resolves
+    light (or fails to resolve at all, e.g. no xdg-desktop-portal on a VM) you
+    get pale grey text on white. Setting both here makes the app look the same
+    everywhere and removes the dependency on the host theme entirely.
+    """
+    app.setStyle("Fusion")
+    bg, base, text = QColor("#232323"), QColor("#191919"), QColor("#e6e6e6")
+    accent, disabled = QColor("#3d6fa5"), QColor("#6f6f6f")
+    p = QPalette()
+    for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive,
+                  QPalette.ColorGroup.Disabled):
+        dim = group == QPalette.ColorGroup.Disabled
+        role = QPalette.ColorRole
+        p.setColor(group, role.Window, bg)
+        p.setColor(group, role.Base, base)
+        p.setColor(group, role.AlternateBase, bg)
+        p.setColor(group, role.Button, bg)
+        p.setColor(group, role.ToolTipBase, base)
+        p.setColor(group, role.Highlight, disabled if dim else accent)
+        p.setColor(group, role.Link, QColor("#9bc0ff"))
+        for r in (role.WindowText, role.Text, role.ButtonText,
+                  role.ToolTipText, role.HighlightedText):
+            p.setColor(group, r, disabled if dim else text)
+        p.setColor(group, role.PlaceholderText, disabled)
+    app.setPalette(p)
+
+
 def main():
     app = QApplication(sys.argv)
+    apply_dark_theme(app)
     # Stop the mouse wheel from changing combo boxes/sliders when scrolling a panel.
     app._wheel_guard = WheelGuard(app)
     app.installEventFilter(app._wheel_guard)
