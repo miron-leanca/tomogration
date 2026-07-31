@@ -1678,6 +1678,7 @@ STAGES = [
             "ℹ RUN THIS ONCE. On an EXISTING population this does not start fresh — it "
             "LOADS it, and fails with a .NET FileNotFoundException if any data source "
             "it references has moved. To start over use 'M: check / reset setup'."),
+        "output_params": ["directory"],
         "docs": {
             "what": "Creates the M project (a 'Population'). Run once per dataset.",
             "range": "directory 'm'; name = anything short and specific.",
@@ -1711,6 +1712,11 @@ STAGES = [
             "population'). NOTE the .source file is written next to the SETTINGS "
             "(warp_tiltseries/<name>.source), not into m/ — delete it by hand and the "
             "population breaks. Use 'M: check / reset setup' instead."),
+        # The .source is NOT beside the settings and NOT in m/ — MTools writes it
+        # into the processing folder named inside the .settings file, which no
+        # parameter here spells out. Find it by name instead of guessing.
+        "output_find": "{name}.source",
+        "output_params": ["population"],
         "docs": {
             "what": "Registers your tilt series (and all their Warp metadata) with the "
                     "population as a Data Source.",
@@ -1745,6 +1751,7 @@ STAGES = [
         "validate": lambda v: ("⚠ Point --i at the map to make a mask from (your "
                                "Refine3D class/half map)."
                                if not str(v.get("i", "")).strip() else ""),
+        "output_params": ["o"],
         "docs": {
             "what": "Makes the binary mask M needs around the particle. M expands it and "
                     "adds a soft edge itself during refinement.",
@@ -1823,6 +1830,7 @@ STAGES = [
             "ℹ half1/half2 must be the UNFILTERED maps (…_unfil.mrc), or the FSC is "
             "meaningless. Symmetry is baked in here — impose only what you're sure of."
             if "unfil" not in str(v.get("half1", "")) else ""),
+        "output_params": ["population"],
         "docs": {
             "what": "Defines the thing being refined: the map, its mask, its symmetry and "
                     "the refined particle poses from RELION.",
@@ -1979,6 +1987,7 @@ STAGES = [
                 "refine_particles", "refine_stageangles", "refine_mag", "ctf_defocus",
                 "ctf_cs", "ctf_zernike3", "ctf_zernike5", "ctf_zernike2",
                 "ctf_zernike4")) >= 4 else ""),
+        "output_params": ["population"],
         "docs": {
             "what": "The refinement engine. Run it repeatedly, adding one parameter per "
                     "round and watching the resolution.",
@@ -2015,6 +2024,7 @@ STAGES = [
                                if not str(v.get("source", "")).strip() else
                                "ℹ Follow this with a plain MCore run (no refine flags) so "
                                "the new weights are actually applied."),
+        "output_params": ["population"],
         "docs": {
             "what": "Estimates exposure/dose weights, either per tilt series or per tilt "
                     "averaged across series.",
@@ -2045,6 +2055,7 @@ STAGES = [
             "⚠ Give the FULL .species path (it contains a random hash). "
             "Find it with:  ls m/species/*/*.species"
             if not str(v.get("species", "")).strip() else ""),
+        "output_params": ["population"],
         "docs": {
             "what": "Increases how finely M models particle pose CHANGE through the tilt "
                     "series (beam-induced motion).",

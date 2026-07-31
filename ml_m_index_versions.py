@@ -51,35 +51,40 @@ REFINE_FLAGS = re.compile(
     r"perdevice_refine|temporal_samples)\b(?:\s+(?!--)\S+)*")
 
 
-def parse_ts(text):
-    """A job-store timestamp -> datetime, or None."""
-    try:
-        return datetime.datetime.strptime(str(text), TS_FMT)
-    except (TypeError, ValueError):
-        return None
+# Share the folder-timing rules with the app rather than reimplementing them: the
+# details pane answers "where did THIS job write?" using the same join, and two
+# copies of a timestamp heuristic would drift apart silently. Falls back to a local
+# copy if the script has been lifted out of the package on its own.
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from tomogration_jobs import folder_time, parse_ts       # noqa: E402
+except Exception:                                            # pragma: no cover
+    def parse_ts(text):
+        """A job-store timestamp -> datetime, or None."""
+        try:
+            return datetime.datetime.strptime(str(text), TS_FMT)
+        except (TypeError, ValueError):
+            return None
 
-
-def folder_time(d: Path):
-    """When M finished writing this version folder.
-
-    The directory's own mtime changes when anything is added to it, so prefer the
-    NEWEST file inside — that is the moment the version was committed.
-    """
-    newest = None
-    try:
-        for f in d.rglob("*"):
-            if f.is_file():
-                t = f.stat().st_mtime
+    def folder_time(d):
+        """When M finished writing this version folder — its newest entry."""
+        newest = None
+        try:
+            for e in Path(d).iterdir():
+                try:
+                    t = e.stat().st_mtime
+                except OSError:
+                    continue
                 if newest is None or t > newest:
                     newest = t
-    except OSError:
-        pass
-    if newest is None:
-        try:
-            newest = d.stat().st_mtime
         except OSError:
-            return None
-    return datetime.datetime.fromtimestamp(newest)
+            pass
+        if newest is None:
+            try:
+                newest = Path(d).stat().st_mtime
+            except OSError:
+                return None
+        return datetime.datetime.fromtimestamp(newest)
 
 
 def folder_size(d: Path):

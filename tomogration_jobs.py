@@ -541,6 +541,165 @@ def m_resolution(line):
         return None
 
 
+# ===========================================================================
+# Where a job's results ACTUALLY landed
+#
+# jobs/<id>/ is a convention, not a fact. Only WarpTools stages that take
+# --output_processing write there; every wrapper stage writes wherever its own
+# parameters point, and M is the worst case — it writes a .population file, a
+# .source next to the SETTINGS, and one randomly-named species version folder per
+# refinement round, none of it under jobs/<id>. Showing "jobs/J64" for an MCore
+# run is simply wrong, and the folder is usually empty.
+# ===========================================================================
+TS_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def parse_ts(text):
+    """A job-store timestamp -> datetime, or None."""
+    try:
+        return datetime.datetime.strptime(str(text), TS_FMT)
+    except (TypeError, ValueError):
+        return None
+
+
+def species_version_dirs(root):
+    """Every m*/species/*/versions/* folder in the project."""
+    try:
+        return sorted(d for d in Path(root).glob("m*/species/*/versions/*")
+                      if d.is_dir())
+    except OSError:
+        return []
+
+
+def folder_time(d):
+    """When the contents of a folder were last written.
+
+    The directory's own mtime moves whenever anything is added, so prefer the
+    newest entry INSIDE it — that is the moment M committed the version.
+
+    Deliberately one level deep (scandir, not rglob). This runs over every
+    version folder in the project, including anything sitting in a multi-GB
+    m_trash_*/, and walking those on ceph is how this app has frozen before.
+    """
+    newest = None
+    try:
+        with os.scandir(d) as it:
+            for e in it:
+                try:
+                    t = e.stat().st_mtime
+                except OSError:
+                    continue
+                if newest is None or t > newest:
+                    newest = t
+    except OSError:
+        pass
+    if newest is None:
+        try:
+            newest = os.stat(d).st_mtime
+        except OSError:
+            return None
+    return datetime.datetime.fromtimestamp(newest)
+
+
+def versions_for_job(root, job, slack_s=900):
+    """The species version folders a given job wrote, project-relative.
+
+    M leaves no link between a run and the folder it produced, so time is the
+    only available join: a version folder belongs to the job that was running
+    when it was written. `slack_s` allows for the version being committed as the
+    run's last act, slightly after the store's recorded finish time.
+    """
+    started = parse_ts(job.get("started"))
+    if started is None:
+        return []
+    finished = parse_ts(job.get("finished"))
+    out = []
+    for d in species_version_dirs(root):
+        when = folder_time(d)
+        if when is None or when < started:
+            continue
+        if finished is not None and (when - finished).total_seconds() > slack_s:
+            continue
+        try:
+            out.append(str(d.relative_to(Path(root))))
+        except ValueError:
+            continue
+    return sorted(out)
+
+
+def job_real_outputs(root, job, spec):
+    """Where this job's results are, as [(project_relative_dir, note)].
+
+    Ordered most-specific first, and every entry is a directory that EXISTS —
+    the details pane opens these, so a path that is merely plausible is worse
+    than none. A parameter naming a FILE contributes its parent directory, with
+    the file named in the note, because that is what there is to open.
+    """
+    root = Path(root)
+    job = job or {}
+    spec = spec or {}
+    params = job.get("params", {}) or {}
+    out, seen = [], set()
+
+    def add(rel, note="", allow_root=False):
+        rel = str(rel).rstrip("/") or "."
+        # "." is the project root. For a param naming a file that happens to sit at
+        # the root it is noise ("this job wrote to your whole project"); for a file
+        # we went looking for and FOUND there it is the answer.
+        if rel == ".." or rel in seen or (rel == "." and not allow_root):
+            return
+        if not (root / rel).is_dir():
+            return
+        seen.add(rel)
+        out.append((rel, note))
+
+    # Per-round M version folders: the one output that identifies THIS run.
+    for rel in versions_for_job(root, job):
+        add(rel, "this run's species version (M names it randomly)")
+
+    for key in spec.get("output_params") or []:
+        raw = str(params.get(key, "") or "").strip()
+        if not raw:
+            continue
+        p = Path(raw)
+        if not p.is_absolute():
+            p = root / p
+        try:
+            rel = os.path.relpath(p, root)
+        except ValueError:
+            continue
+        if p.is_dir():
+            add(rel)
+        elif p.is_file():
+            add(os.path.dirname(rel), f"holds {p.name}")
+        else:
+            # Named but absent: a file M has not written yet, or a path typo.
+            # Its parent is still the right place to look.
+            add(os.path.dirname(rel), f"{p.name} is not there (yet)")
+
+    # Some outputs cannot be derived from a parameter at all. MTools create_source
+    # writes <name>.source into the PROCESSING folder named inside the .settings
+    # file — not beside the settings, and not into m/ — so the only honest way to
+    # find it is to look. Bounded to two levels; the project root holds frames/.
+    pattern = spec.get("output_find")
+    if pattern:
+        name = _subst_params(pattern, params)
+        if name and "{" not in name:
+            for cand in itertools.chain(root.glob(name), root.glob(f"*/{name}")):
+                if cand.is_file():
+                    add(os.path.relpath(cand.parent, root), f"holds {cand.name}",
+                        allow_root=True)
+    return out
+
+
+def _subst_params(pattern, params):
+    """Fill {param} placeholders in an output pattern from a job's params."""
+    out = pattern
+    for key, val in (params or {}).items():
+        out = out.replace("{" + str(key) + "}", str(val))
+    return out.strip()
+
+
 def params_for_builder(spec, recorded):
     """Split a past job's recorded params against what its stage declares TODAY.
 

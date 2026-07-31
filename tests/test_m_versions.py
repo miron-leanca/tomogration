@@ -244,5 +244,148 @@ for _s in st.STAGES:
 check(f"every stage round-trips its own params{(' — ' + ', '.join(_bad)) if _bad else ''}",
       not _bad)
 
+
+# ---- job_real_outputs: where a job's files ACTUALLY are --------------------
+# jobs/<id>/ is a convention, not a fact. An MCore card used to advertise
+# "OUTPUTS: jobs/J64" while M had written to m/ and the folder was empty.
+def m_project(tmp, version_age=None, started=None, finished=None):
+    """A project shaped like a real M run: population file, species version."""
+    root = Path(tmp)
+    (root / "m").mkdir(parents=True)
+    (root / "m" / "EML45.population").write_text("<pop/>")
+    (root / "warp_tiltseries").mkdir()
+    (root / "warp_tiltseries" / "warp_tiltseries.settings").write_text("<s/>")
+    if version_age is not None:
+        v = root / "m/species/EML45_30cc83ca/versions/Hhhxx2to"
+        v.mkdir(parents=True)
+        f = v / "map.mrc"
+        f.write_bytes(b"x" * 512)
+        t = time.time() - version_age
+        os.utime(f, (t, t))
+        os.utime(v, (t, t))
+    return root
+
+
+CORE = next(s for s in st.STAGES if s["id"] == "m_core")
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = m_project(tmp, version_age=300)
+    job = {"id": "J64", "stage_id": "m_core", "started": ago_ts(400),
+           "finished": ago_ts(250),
+           "params": {"population": "m/EML45.population"}}
+    got = jobs.job_real_outputs(root, job, CORE)
+    rels = [r for r, _ in got]
+    check("m_core no longer reports only jobs/<id>", "jobs/J64" not in rels)
+    check("m_core reports the population's own directory", "m" in rels)
+    check("m_core reports THIS run's species version folder",
+          "m/species/EML45_30cc83ca/versions/Hhhxx2to" in rels)
+    check("the version folder is listed first (most specific)",
+          rels[0].startswith("m/species/"))
+    check("the version folder carries an explanatory note",
+          "random" in dict(got)["m/species/EML45_30cc83ca/versions/Hhhxx2to"])
+    check("a param naming a FILE resolves to its directory, and says so",
+          "EML45.population" in dict(got)["m"])
+
+    # A version written before this job started belongs to an earlier round.
+    older = {"id": "J65", "stage_id": "m_core", "started": ago_ts(100),
+             "finished": ago_ts(10), "params": {"population": "m/EML45.population"}}
+    rels = [r for r, _ in jobs.job_real_outputs(root, older, CORE)]
+    check("a version predating the job is not claimed by it",
+          not any("versions/" in r for r in rels))
+    check("but the population directory is still reported", "m" in rels)
+
+with tempfile.TemporaryDirectory() as tmp:
+    # Absolute paths are what the M cards actually store (create_species writes
+    # them out in full), so they must resolve the same way relative ones do.
+    root = m_project(tmp, version_age=300)
+    job = {"id": "J64", "stage_id": "m_core", "started": ago_ts(400),
+           "finished": ago_ts(250),
+           "params": {"population": str(Path(root) / "m" / "EML45.population")}}
+    rels = [r for r, _ in jobs.job_real_outputs(root, job, CORE)]
+    check("an absolute population path resolves to a relative output", "m" in rels)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = m_project(tmp)
+    job = {"id": "J64", "stage_id": "m_core", "started": ago_ts(400),
+           "finished": ago_ts(250), "params": {"population": "m/nope.population"}}
+    got = dict(jobs.job_real_outputs(root, job, CORE))
+    check("a named-but-absent output still points at its parent", "m" in got)
+    check("and says the file is not there", "not there" in got["m"])
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = m_project(tmp)
+    job = {"id": "J64", "stage_id": "m_core", "started": ago_ts(400),
+           "finished": ago_ts(250), "params": {"population": "/elsewhere/x.population"}}
+    check("a path outside the project is not invented as an output",
+          jobs.job_real_outputs(root, job, CORE) == [])
+    check("a job with no params yields nothing",
+          jobs.job_real_outputs(root, {"id": "J1"}, CORE) == [])
+    check("a job that never started claims no version folders",
+          jobs.versions_for_job(root, {"id": "J1"}) == [])
+
+# Every M stage that writes something must now declare where — this is the gap
+# that made the details pane point at an empty jobs/<id> for the whole group.
+_writers = {"m_create_population", "m_create_source", "m_mask_create",
+            "m_create_species", "m_core", "m_estimate_weights",
+            "m_resample_trajectories"}
+_undeclared = sorted(s["id"] for s in st.STAGES
+                     if s["id"] in _writers and not s.get("output_params"))
+check(f"every M stage that writes declares output_params"
+      f"{(' — missing: ' + ', '.join(_undeclared)) if _undeclared else ''}",
+      not _undeclared)
+# ...and each named param must actually exist on that stage, or it silently
+# resolves to nothing and we are back to advertising jobs/<id>.
+_bogus = []
+for _s in st.STAGES:
+    _names = {p["name"] for p in _s.get("params", [])}
+    for _k in _s.get("output_params") or []:
+        if _k not in _names:
+            _bogus.append(f"{_s['id']}.{_k}")
+check(f"output_params name real parameters"
+      f"{(' — bogus: ' + ', '.join(_bogus)) if _bogus else ''}", not _bogus)
+
+
+# ---- create_source: the .source file nobody can find -----------------------
+# MTools writes <name>.source into the PROCESSING folder named inside the
+# .settings file — not beside the settings, not into m/. No parameter spells that
+# out, so it is found by name. Deleting it by hand breaks the population, which
+# makes "where is it?" a question worth answering correctly.
+SRC = next(s for s in st.STAGES if s["id"] == "m_create_source")
+with tempfile.TemporaryDirectory() as tmp:
+    root = m_project(tmp)
+    (root / "warp_tiltseries" / "EML45.source").write_text("<src/>")
+    job = {"id": "J52", "stage_id": "m_create_source", "started": ago_ts(400),
+           "finished": ago_ts(250),
+           "params": {"name": "EML45", "population": "m/EML45.population",
+                      "processing_settings": "warp_tiltseries.settings"}}
+    got = dict(jobs.job_real_outputs(root, job, SRC))
+    check("create_source finds the .source in the processing folder",
+          "warp_tiltseries" in got)
+    check("and names the file it found", "EML45.source" in got["warp_tiltseries"])
+    check("create_source also reports the population directory", "m" in got)
+    check("the settings' own folder is not claimed as an output",
+          "." not in got)
+
+with tempfile.TemporaryDirectory() as tmp:
+    # Before create_source has run there is no .source anywhere — say nothing
+    # rather than point at a folder that does not hold it.
+    root = m_project(tmp)
+    job = {"id": "J52", "stage_id": "m_create_source", "started": ago_ts(400),
+           "finished": ago_ts(250),
+           "params": {"name": "EML45", "population": "m/EML45.population"}}
+    got = dict(jobs.job_real_outputs(root, job, SRC))
+    check("no .source yet -> the processing folder is not claimed",
+          "warp_tiltseries" not in got)
+
+with tempfile.TemporaryDirectory() as tmp:
+    # An unsubstituted placeholder must never become a glob — "{name}.source"
+    # is how MTools once created a population literally called {name}.population.
+    root = m_project(tmp)
+    job = {"id": "J52", "stage_id": "m_create_source", "started": ago_ts(400),
+           "finished": ago_ts(250), "params": {"population": "m/EML45.population"}}
+    got = dict(jobs.job_real_outputs(root, job, SRC))
+    check("an unfilled {name} placeholder finds nothing",
+          "warp_tiltseries" not in got and "." not in got)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

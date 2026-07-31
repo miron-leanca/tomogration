@@ -254,7 +254,7 @@ from tomogration_jobs import (
     template_corr_suffix, template_match_suffix, match_star_infix, DOWNSTREAM,
     derive_child_params, summarize_job, summary_text, FRIENDLY_TITLES,
     stage_title, _job_seq, is_cryolo_job, canvas_layout, card_is_running,
-    discover_picksets, m_resolution, params_for_builder,
+    discover_picksets, m_resolution, params_for_builder, job_real_outputs,
     discover_relion_jobs, _PICK_STAR_RE,
 )
 
@@ -2084,7 +2084,8 @@ class Tomogration(QMainWindow):
         jobs/<id>/outputs -> <real dir> (plus a one-line WHERE_ARE_THE_OUTPUTS.txt for
         anyone browsing over ceph/SMB where symlinks may not resolve). Never overwrites
         real files; failures are logged, not raised."""
-        real = self._job_output_dirs(job_id, stage_id)
+        pairs = self._job_output_dirs(job_id, stage_id, with_notes=True)
+        real = [rel for rel, _ in pairs]
         if not real:
             return
         jobdir = Path(self.project_root) / job_output_dir(job_id)
@@ -2105,8 +2106,8 @@ class Tomogration(QMainWindow):
                 self._log(f"{job_id}: could not link outputs -> {rel} ({e})", "warning")
         try:
             (jobdir / "WHERE_ARE_THE_OUTPUTS.txt").write_text(
-                f"This step writes its results to:\n"
-                + "".join(f"    {r}/\n" for r in real)
+                f"{job_id} wrote its results to:\n"
+                + "".join(f"    {r}/{('   — ' + w) if w else ''}\n" for r, w in pairs)
                 + f"(relative to the project root {self.project_root})\n"
                   f"The 'outputs' symlink here points at the first of these.\n")
         except OSError:
@@ -2129,37 +2130,28 @@ class Tomogration(QMainWindow):
         except (OSError, TypeError, ValueError):
             return 0
 
-    def _job_output_dirs(self, job_id, stage_id):
-        """Where a job's files REALLY land, project-relative. Most WarpTools stages write
-        into jobs/<id>/, but wrapper stages take their destination from their own params
-        (relion4_convert/class3d -> project_dir, the converters -> out_dir, export ->
-        output_processing). Returns the existing ones, de-duplicated, so the details pane
-        can point at real files instead of an empty job folder."""
-        spec = self._stage_by_id(stage_id) or {}
-        keys = spec.get("output_params") or []
+    def _job_output_dirs(self, job_id, stage_id, with_notes=False):
+        """Where a job's files REALLY land, project-relative.
+
+        jobs/<id>/ is a convention, not a fact: only WarpTools stages that take
+        --output_processing write there. Wrapper stages write wherever their own
+        params point, and M writes a .population, a .source next to the SETTINGS,
+        and a randomly-named species version folder per round — none of it under
+        jobs/<id>, which is why an MCore card used to advertise an empty folder.
+        The resolution itself is pure and lives in tomogration_jobs.
+
+        Returns bare paths by default (callers that just want somewhere to look),
+        or [(path, note)] with `with_notes`.
+        """
         root = getattr(self, "project_root", None)
-        if not keys or not isinstance(root, (str, os.PathLike)):
+        if not isinstance(root, (str, os.PathLike)):
             return []
         try:
             job = load_jobs(root).get("jobs", {}).get(job_id) or {}
+            pairs = job_real_outputs(root, job, self._stage_by_id(stage_id) or {})
         except Exception:
             return []
-        params = job.get("params", {}) or {}
-        out, seen = [], set()
-        for k in keys:
-            rel = str(params.get(k, "") or "").strip()
-            if not rel:
-                continue
-            if os.path.isabs(rel):                    # make it project-relative if we can
-                try:
-                    rel = os.path.relpath(rel, self.project_root)
-                except ValueError:
-                    pass
-            rel = rel.rstrip("/")
-            if rel and rel not in seen and (Path(self.project_root) / rel).is_dir():
-                seen.add(rel)
-                out.append(rel)
-        return out
+        return pairs if with_notes else [rel for rel, _ in pairs]
 
     def _open_dir_button(self, label, rel):
         b = QPushButton(label)
@@ -2251,10 +2243,12 @@ class Tomogration(QMainWindow):
             # jobs/<id>/; wrapper stages (relion4_*, aretomo, miss-alignment) write to a
             # path given in their own params, which used to leave the details pane
             # pointing at an empty jobs/<id> folder. List the real destinations first.
-            real = self._job_output_dirs(node["id"], stage_id)
-            for rel in real:
+            real = self._job_output_dirs(node["id"], stage_id, with_notes=True)
+            for rel, why in real:
                 self.details_box.addWidget(self._open_dir_button(f"📂  {rel}", rel))
-                self._add_pattern_hint("writes", DIR_FILE_HINTS.get(rel))
+                # A note earned from THIS job (which version folder it wrote, which
+                # file lives there) beats the stage's generic pattern hint.
+                self._add_pattern_hint("writes", why or DIR_FILE_HINTS.get(rel))
             outrel = f"jobs/{node['id']}"
             n_here = self._count_dir_entries(outrel)
             if n_here or not real:
@@ -2263,8 +2257,8 @@ class Tomogration(QMainWindow):
                     self._add_pattern_hint("writes",
                                            DIR_FILE_HINTS.get(outs[0]) if outs else None)
             else:
-                note = QLabel(f"    (job folder {outrel}/ is empty — this step writes to "
-                              f"the path above, set in its parameters)")
+                note = QLabel(f"    (jobs/{node['id']}/ is empty — this step writes to "
+                              f"the path(s) above, set in its parameters)")
                 note.setStyleSheet("color:#7c7c7c;font-size:10px;")
                 note.setWordWrap(True)
                 self.details_box.addWidget(note)
