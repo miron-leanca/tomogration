@@ -36,12 +36,15 @@ import subprocess
 from pathlib import Path
 
 import struct
+import time
 import array as _array
 
-from PySide6.QtCore import Qt, QObject, QEvent, Signal, QProcess, QTimer
+from PySide6.QtCore import (
+    Qt, QObject, QEvent, Signal, QProcess, QTimer, QSize, QRect, QPoint,
+)
 from PySide6.QtGui import (
     QBrush, QColor, QImage, QPixmap, QTextCursor, QFont, QPen, QPainter,
-    QPalette,
+    QPalette, QFontMetrics,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
@@ -51,8 +54,75 @@ from PySide6.QtWidgets import (
     QInputDialog, QListWidgetItem, QTextBrowser,
     QAbstractScrollArea, QAbstractSpinBox, QSpinBox,
     QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsSimpleTextItem,
-    QMenu,
+    QMenu, QLayout, QSizePolicy, QProgressBar,
 )
+
+
+class FlowLayout(QLayout):
+    """A layout that lays widgets left-to-right and WRAPS to the next line when it
+    runs out of width — like text. Used for the Job-builder button row so a narrow
+    right panel wraps the buttons onto extra rows instead of forcing the whole form
+    wider than the panel (which clipped the wrapped help text). Its minimumSize is
+    just the widest single child, so the form can shrink freely."""
+
+    def __init__(self, parent=None, margin=0, spacing=6):
+        super().__init__(parent)
+        if parent is not None:
+            self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+        self._items = []
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _do_layout(self, rect, test_only):
+        x, y, line_h = rect.x(), rect.y(), 0
+        sp = self.spacing()
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + sp
+            if next_x - sp > rect.right() and line_h > 0:
+                x = rect.x()
+                y = y + line_h + sp
+                next_x = x + hint.width() + sp
+                line_h = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y()
 
 
 class WheelGuard(QObject):
@@ -127,2217 +197,82 @@ def mrc_to_qimage(path, max_dim=180):
         return None
 
 
-# Companion scripts ship next to this file. Resolve them to ABSOLUTE paths so
-# stage commands work regardless of which project root the user selects at
-# startup (commands run with cwd = the selected data dir, not the app dir).
-_PKG_DIR = Path(__file__).resolve().parent
+# ---------------------------------------------------------------------------
+# The app was one 7,900-line file; the pieces below now live in siblings so they
+# can be edited and unit-tested on their own (and so two people editing the app
+# stop colliding on the same file). Import graph: core -> stages -> jobs, with
+# project depending only on core. Everything is re-exported into this module's
+# namespace, so existing references — and the tests, which load this file by
+# path — keep working unchanged.
+# ---------------------------------------------------------------------------
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # siblings importable
+                                                           # when loaded by path
+# The app is split across sibling modules, so ALL of tomogration_*.py must be copied
+# to the VM together. Copying only tomogration_app.py leaves a stale sibling and the
+# failure is a raw ImportError deep in a traceback — turn it into a plain instruction.
+try:
+    from tomogration_core import (_PKG_DIR, _pkg_script, expand_tilt_ranges,
+                                  progress_key)
+except ImportError as _e:
+    _here = Path(__file__).resolve().parent
+    _need = ["tomogration_core.py", "tomogration_stages.py",
+             "tomogration_project.py", "tomogration_jobs.py"]
+    _missing = [f for f in _need if not (_here / f).is_file()]
+    raise SystemExit(
+        "\n".join([
+            "",
+            "tomogration: this install is out of date or incomplete.",
+            f"  {_e}",
+            "",
+            "tomogration is split across several files and they must be copied",
+            "TOGETHER — updating tomogration_app.py alone leaves a stale sibling.",
+            f"  folder: {_here}",
+            ("  MISSING: " + ", ".join(_missing)) if _missing
+            else "  All files are present, so one of them is an OLD version.",
+            "",
+            "Copy every tomogration_*.py from your dev folder and relaunch.",
+            "",
+        ]))
+from tomogration_stages import *            # noqa: F401,F403
+from tomogration_stages import (            # explicit: the names used below
+    # underscore names are NOT re-exported by `import *` — list them
+    _h, _norm_gpu, _validate_export,
+    STAGES, STAGE_OUTPUTS, STAGE_IO, DIR_FILE_HINTS, COLUMN_OF_GROUP,
+    COLUMN_TITLES, KEY_DIRS, JOB_STAGES, TRUNK_STAGES, ARCHIVE_ON_RERUN,
+    THREEDMOD_EXTS, TEXT_EXTS, build_command, stage_defaults, _norm_gpu,
+    render_docs_html, render_inline_docs_html, _validate_export,
+)
+from tomogration_project import ProjectState, EXPECTED_DIRS, _FAILED_FILE_RE
+from tomogration_jobs import *              # noqa: F401,F403
+from tomogration_jobs import (
+    # underscore names are NOT re-exported by `import *` — list them
+    _APX_RE, _CTF_DEFOCUS_RE, _PICK_STAR_RE, _count_glob, _job_seq, _jobnum, _mean_std, _picktag,
+    JOBS_FILE, jobs_path, load_jobs, save_jobs, queued_jobs, job_output_dir,
+    reconcile_running, job_delete_targets, PROTECTED_DIRS,
+    new_job, update_job, delete_job, is_warp_stage, parent_job_id,
+    io_flags_for_job, build_job_command, default_parent_for, fmt_angpix,
+    template_corr_suffix, template_match_suffix, match_star_infix, DOWNSTREAM,
+    derive_child_params, summarize_job, summary_text, FRIENDLY_TITLES,
+    stage_title, _job_seq, is_cryolo_job, canvas_layout, card_is_running,
+    discover_picksets, m_resolution, params_for_builder,
+    discover_relion_jobs, _PICK_STAR_RE,
+)
 
-
-def _pkg_script(name):
-    """Absolute path to a shipped companion script, bash-quoted if it has spaces."""
-    p = str(_PKG_DIR / name)
-    return f'"{p}"' if (" " in p or "\t" in p) else p
-
-
-EXPECTED_DIRS = [
-    "frames", "frames/bad", "mdocs", "mdocs/bad", "gains",
-    "aretomo_output", "aretomo_output/Imod",
-    "warp_frameseries", "warp_tiltseries", "tomostar",
-]
-
-# WarpTools per-item failure line; used by auto-recovery to find the culprit.
-_FAILED_FILE_RE = re.compile(
-    r"Failed to process\s+(\S+\.(?:eer|mrc|tiff?|st|tomostar))", re.IGNORECASE)
-# WarpTools per-item progress line, e.g. "239/5439, 08:06:22 remaining" or
-# "5439/5439, previous metadata found for 278" — collapsed to one updating line.
-_PROGRESS_RE = re.compile(r"^\s*\d+\s*/\s*\d+\b")
+# A progress line to be collapsed into ONE updating line. Covers both dialects:
+#   WarpTools : "239/5439, 08:06:22 remaining"   "5439/5439, previous metadata..."
+#   RELION    : "0.58/2.13 min ......~~(,_,\">"   "000/??? sec ~~(,_,\"> [oo]"
+# RELION's are DECIMAL and its ETA bar redraws constantly — the old integer-only
+# pattern missed them, so every tick appended a new line and flooded the log.
+_PROGRESS_RE = re.compile(
+    r"^\s*(?:"
+    r"\d+(?:\.\d+)?\s*/\s*(?:\d+(?:\.\d+)?\b|\?+)"   # N/M, 0.58/2.13, 000/???
+    r"|[.\s]*~~\(,_,"                                    # RELION's progress fish
+    r")")
 
 
 # ===========================================================================
 # ProjectState  —  framework-agnostic backend (ported from warp_auto.py)
 # ===========================================================================
-class ProjectState:
-    """Inspects what exists under a project root and reports per-stage status.
-    Pure stdlib (pathlib/os/json/re/datetime) — no GUI dependencies."""
-
-    AUTO_EXCLUSION_HEADER = (
-        "# --- Auto-excluded during processing (do not edit above this line) ---")
-
-    def __init__(self, root):
-        self.root = Path(root)
-
-    # ---- generic helpers -------------------------------------------------
-    def exists(self, rel_path):
-        return (self.root / rel_path).exists()
-
-    def count_files(self, rel_path, pattern):
-        p = self.root / rel_path
-        return len(list(p.glob(pattern))) if p.is_dir() else 0
-
-    def count_rglob(self, rel_path, pattern):
-        p = self.root / rel_path
-        return len(list(p.rglob(pattern))) if p.is_dir() else 0
-
-    def list_files(self, rel_path, pattern):
-        p = self.root / rel_path
-        return sorted(f.name for f in p.glob(pattern)) if p.is_dir() else []
-
-    # ---- processing history (per-dataset job log for the History window) -----
-    HISTORY_FILE = ".tomogration_history.json"
-
-    def load_history(self):
-        p = self.root / self.HISTORY_FILE
-        if not p.is_file():
-            return []
-        try:
-            data = json.loads(p.read_text())
-            return data if isinstance(data, list) else []
-        except (OSError, ValueError):
-            return []
-
-    def _save_history(self, hist):
-        try:
-            (self.root / self.HISTORY_FILE).write_text(json.dumps(hist, indent=1))
-        except OSError:
-            pass
-
-    def append_history(self, record):
-        hist = self.load_history()
-        hist.append(record)
-        self._save_history(hist)
-        return len(hist) - 1
-
-    def update_history(self, index, **fields):
-        hist = self.load_history()
-        if isinstance(index, int) and 0 <= index < len(hist):
-            hist[index].update(fields)
-            self._save_history(hist)
-
-    def archive_output_dir(self, rel):
-        """Rename a non-empty output dir aside (timestamped) so a re-run keeps the
-        old result instead of overwriting it. Returns the archive rel-path or ''."""
-        d = self.root / rel
-        try:
-            if not d.is_dir() or not any(d.iterdir()):
-                return ""
-            stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            dest = d.with_name(d.name + f".bak_{stamp}")
-            d.rename(dest)
-            return os.path.relpath(dest, self.root)
-        except OSError:
-            return ""
-
-    # ---- per-stage status (each returns (count_or_bool, label_or_None)) ---
-    def status_renamed_frames(self):
-        n = self.count_files("frames", "Position*.eer")
-        return (n, f"{n} .eer files" if n else None)
-
-    def status_listfile(self):
-        """'Rename ran' marker: the listfile rename writes (in the project root,
-        wherever rename was run). Independent of whether files were sorted yet."""
-        files = sorted(self.root.glob("listfile_*.txt")) if self.root.is_dir() else []
-        if (self.root / "listfile.txt").is_file():
-            files.append(self.root / "listfile.txt")
-        return (bool(files), files[0].name if files else None)
-
-    def status_mdocs(self):
-        n = self.count_files("mdocs", "Position*.mdoc")
-        return (n, f"{n} .mdoc files" if n else None)
-
-    def status_exclusion_list(self):
-        ok = self.exists("exclusion_list.txt")
-        return (ok, "exclusion_list.txt" if ok else None)
-
-    def status_exclusions(self):
-        """Green when exclusion_list.txt actually holds exclusion entries (a
-        non-comment, non-blank line) — i.e. the inspect/select step has been done."""
-        p = self.root / "exclusion_list.txt"
-        if not p.is_file():
-            return (0, None)
-        n = sum(1 for ln in p.read_text(errors="replace").splitlines()
-                if ln.strip() and not ln.strip().startswith("#"))
-        return (n, f"{n} exclusion entries" if n else None)
-
-    def status_conv_key(self):
-        ok = self.exists("new_imod_conv_key.txt")
-        return (ok, "new_imod_conv_key.txt" if ok else None)
-
-    def status_gain_original(self):
-        p = self.root / "gains"
-        if not p.is_dir():
-            return (False, None)
-        matches = sorted(p.glob("*.gain")) + sorted(p.glob("*_gain*.mrc"))
-        matches = [m for m in matches if "reciprocal" not in m.name.lower()]
-        return (True, matches[0].name) if matches else (False, None)
-
-    def status_gain_reciprocal(self):
-        p = self.root / "gains"
-        if not p.is_dir():
-            return (False, None)
-        matches = sorted(p.glob("*reciprocal*.mrc"))
-        return (True, matches[0].name) if matches else (False, None)
-
-    def gain_source(self):
-        """Relative path to the detected non-reciprocal gain (gains/<name>), or ''."""
-        ok, name = self.status_gain_original()
-        return f"gains/{name}" if ok and name else ""
-
-    def status_fs_settings(self):
-        ok = self.exists("warp_frameseries.settings")
-        return (ok, "warp_frameseries.settings" if ok else None)
-
-    def status_ts_settings(self):
-        ok = self.exists("warp_tiltseries.settings")
-        return (ok, "warp_tiltseries.settings" if ok else None)
-
-    def status_fs_motion_ctf(self):
-        n = self.count_files("warp_frameseries", "*.xml")
-        return (n, f"{n} processed frames" if n else None)
-
-    def status_tomostar(self):
-        n = self.count_files("tomostar", "*.tomostar")
-        return (n, f"{n} .tomostar files" if n else None)
-
-    def status_ts_stacks(self):
-        p = self.root / "warp_tiltseries" / "tiltstack"
-        if not p.is_dir():
-            return (0, None)
-        n = sum(1 for d in p.iterdir() if d.is_dir() and (d / f"{d.name}.st").exists())
-        return (n, f"{n} stacks" if n else None)
-
-    def status_aretomo_xf(self):
-        """Count AreTomo .xf alignments in the newest version folder."""
-        versions = self.list_aretomo_versions()
-        if not versions:
-            return (0, None)
-        active = versions[-1]
-        n = 0
-        for layout in ("Imod", "imod"):
-            ld = active / layout
-            if ld.is_dir():
-                n += sum(1 for sub in ld.iterdir()
-                         if sub.is_dir() and list(sub.glob("*.xf")))
-        label = f"{n} .xf ({active.name})"
-        if len(versions) > 1:
-            label += f" [{len(versions)} versions]"
-        return (n, label if n else None)
-
-    def status_alignments_imported(self):
-        """imod subdirs with both .xf and .tlt, ready for ts_import_alignments."""
-        versions = self.list_aretomo_versions()
-        if not versions:
-            return (0, None)
-        active = versions[-1]
-        n = 0
-        for layout in ("Imod", "imod"):
-            ld = active / layout
-            if ld.is_dir():
-                n += sum(1 for sub in ld.iterdir() if sub.is_dir()
-                         and list(sub.glob("*.xf")) and list(sub.glob("*.tlt")))
-        return (n, f"{n} alignments ready ({active.name})" if n else None)
-
-    def status_selection_sync(self):
-        if self.status_tomostar()[0] == 0:
-            return (False, None)
-        missing = self.tomostars_without_alignments()
-        if missing:
-            return (False, f"{len(missing)} tilt series missing alignment")
-        return (True, "all tomostars have alignments")
-
-    def status_ts_ctf(self):
-        n = self.count_files("warp_tiltseries", "*.xml")
-        return (n, f"{n} processed tilt series" if n else None)
-
-    def status_warp_tomograms(self):
-        p = self.root / "warp_tiltseries" / "reconstruction"
-        if not p.is_dir():
-            return (0, None)
-        n = len(list(p.glob("*.mrc")))
-        return (n, f"{n} tomograms" if n else None)
-
-    def status_template_matches(self):
-        n = self.count_rglob("warp_tiltseries", "*.star")
-        return (n, f"{n} match .star" if n else None)
-
-    def status_thresholded(self):
-        n = self.count_rglob("warp_tiltseries", "*clean.star")
-        return (n, f"{n} clean .star" if n else None)
-
-    def status_exported(self):
-        n = self.count_rglob("relion4", "*.star")
-        return (n, f"{n} .star in relion4/" if n else None)
-
-    # ---- AreTomo versioned-folder pattern --------------------------------
-    def list_aretomo_versions(self):
-        """aretomo_output folders sorted oldest->newest. 'aretomo_output' is
-        version 1; 'aretomo_output-v<N>' follow. Only folders with a standard
-        subdir (mrc/Imod/imod/aln/proj) or a PARAMETERS.txt are considered."""
-        candidates = []
-        if not self.root.is_dir():
-            return []
-        for d in sorted(self.root.iterdir()):
-            if not d.is_dir():
-                continue
-            name = d.name
-            if name == "aretomo_output":
-                version = 1
-            elif name.startswith("aretomo_output-v"):
-                try:
-                    version = int(name[len("aretomo_output-v"):])
-                except ValueError:
-                    continue
-            else:
-                continue
-            has_content = any((d / sub).is_dir()
-                              for sub in ("mrc", "Imod", "imod", "aln", "proj"))
-            if has_content or (d / "PARAMETERS.txt").is_file():
-                candidates.append((version, d))
-        candidates.sort(key=lambda x: x[0])
-        return [c[1] for c in candidates]
-
-    def latest_aretomo_imod(self):
-        """Root-relative '<aretomo_output[-vN]>/Imod/' for the NEWEST AreTomo folder
-        that actually contains alignment files (a .xf directly or one level down, as
-        AreTomo writes <series>_Imod/<series>.xf), or '' if none. This only sets the
-        ts_import_alignments DEFAULT — the 'alignments' field is editable, so type in a
-        specific version (e.g. aretomo_output-v2/Imod/) to import from an older or more
-        complete run. AreTomo auto-versions; a stale base 'aretomo_output/Imod/' fails
-        with 'Could not find <series>.xf'."""
-        for d in reversed(self.list_aretomo_versions()):
-            imod = d / "Imod"
-            if not imod.is_dir():
-                continue
-            if next(imod.glob("*.xf"), None) or next(imod.glob("*/*.xf"), None):
-                return os.path.relpath(imod, self.root) + "/"
-        return ""
-
-    def next_aretomo_version_path(self):
-        """Path to use for the next AreTomo run. If no versions exist, returns
-        aretomo_output; otherwise the next aretomo_output-v<N+1>."""
-        versions = self.list_aretomo_versions()
-        if not versions:
-            return self.root / "aretomo_output"
-        highest = 1
-        for d in versions:
-            if d.name == "aretomo_output":
-                highest = max(highest, 1)
-            elif d.name.startswith("aretomo_output-v"):
-                try:
-                    highest = max(highest, int(d.name[len("aretomo_output-v"):]))
-                except ValueError:
-                    pass
-        return self.root / f"aretomo_output-v{highest + 1}"
-
-    def write_aretomo_parameters(self, output_dir, values, command):
-        """Drop a PARAMETERS.txt audit record into a versioned AreTomo folder,
-        so a run can always be matched back to the parameters that produced it.
-        Generalises the bash-script pattern (brief §4.6 / §5 iteration queue)."""
-        out = Path(output_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        lines = ["# AreTomo2 run parameters",
-                 f"# Written by tomogration at {ts}", ""]
-        for k, v in values.items():
-            s = str(v).strip()
-            if s:
-                lines.append(f"{k:<16}= {s}")
-        lines += ["", "# full command", command, ""]
-        pf = out / "PARAMETERS.txt"
-        pf.write_text("\n".join(lines))
-        return pf
-
-    # ---- selection sync helper ------------------------------------------
-    def tomostars_without_alignments(self):
-        """tomostar basenames present in tomostar/ but with no .xf in the newest
-        AreTomo version folder. These crash ts_reconstruct unless deselected."""
-        tomostar_dir = self.root / "tomostar"
-        if not tomostar_dir.is_dir():
-            return []
-        all_tomostars = {f.stem for f in tomostar_dir.glob("*.tomostar")}
-        if not all_tomostars:
-            return []
-        versions = self.list_aretomo_versions()
-        aligned = set()
-        if versions:
-            active = versions[-1]
-            for layout in ("Imod", "imod"):
-                ld = active / layout
-                if not ld.is_dir():
-                    continue
-                for sub in ld.iterdir():
-                    if sub.is_dir() and list(sub.glob("*.xf")):
-                        name = sub.name
-                        if name.endswith("_Imod"):
-                            name = name[:-5]
-                        aligned.add(name)
-        return sorted(all_tomostars - aligned)
-
-    # ---- position-level inspection: mdoc contents vs frames/ -------------
-    def parse_mdoc_subframes(self, mdoc_path):
-        """[(acq_index, tilt_angle, eer_basename), ...] in acquisition order."""
-        entries = []
-        current_angle = None
-        current_subframe = None
-        acq_index = 0
-
-        def flush():
-            nonlocal current_angle, current_subframe, acq_index
-            if current_subframe is not None:
-                entries.append((acq_index, current_angle, current_subframe))
-            current_angle = None
-            current_subframe = None
-
-        if not os.path.isfile(mdoc_path):
-            return entries
-        with open(mdoc_path, errors="replace") as f:
-            for line in f:
-                s = line.strip()
-                if s.startswith("[ZValue"):
-                    flush()
-                    acq_index += 1
-                elif s.startswith("TiltAngle") and "=" in s:
-                    try:
-                        current_angle = float(s.split("=", 1)[1].strip())
-                    except ValueError:
-                        pass
-                elif s.startswith("SubFramePath") and "=" in s:
-                    raw = s.split("=", 1)[1].strip().replace("\\", "/")
-                    current_subframe = raw.rsplit("/", 1)[-1]
-        flush()
-        return entries
-
-    def inspect_positions(self):
-        """For every Position with a .mdoc, compare mdoc subframes against
-        frames/. Returns a list of per-position dicts."""
-        results = []
-        mdocs_dir = self.root / "mdocs"
-        frames_dir = self.root / "frames"
-        if not mdocs_dir.is_dir():
-            return results
-        frames_by_pos = {}
-        if frames_dir.is_dir():
-            for f in frames_dir.glob("Position*.eer"):
-                frames_by_pos.setdefault(f.name.split("_")[0], []).append(f.name)
-        for mdoc in sorted(mdocs_dir.glob("Position*.mdoc")):
-            pos = mdoc.stem
-            entries = self.parse_mdoc_subframes(str(mdoc))
-            referenced = {e[2] for e in entries if e[2]}
-            on_disk = set(frames_by_pos.get(pos, []))
-            results.append({
-                "name": pos,
-                "mdoc_path": str(mdoc),
-                "mdoc_entries": entries,
-                "frames_on_disk": sorted(on_disk),
-                "matched": sorted(referenced & on_disk),
-                "extra_on_disk": sorted(on_disk - referenced),
-                "missing_from_disk": sorted(referenced - on_disk),
-            })
-        return results
-
-    def move_frames_to_bad(self, names):
-        """Move named .eer files from frames/ to frames/bad/. Returns count."""
-        frames = self.root / "frames"
-        bad = frames / "bad"
-        bad.mkdir(parents=True, exist_ok=True)
-        moved = 0
-        for n in names:
-            src = frames / n
-            if src.is_file():
-                try:
-                    src.rename(bad / n)
-                    moved += 1
-                except OSError:
-                    pass
-        return moved
-
-    # ---- raw-dump sorter -------------------------------------------------
-    @staticmethod
-    def _sort_bucket(name):
-        """Which standard folder a file belongs in (or None to leave alone).
-        Tomo5 *_override.mdoc are handled separately, not here."""
-        low = name.lower()
-        if low.endswith(".eer"):
-            return "frames"
-        if low.endswith(".gain") or ("gain" in low and low.endswith(".mrc")):
-            return "gains"
-        if low.endswith(".mdoc") and not low.endswith("_override.mdoc"):
-            return "mdocs"
-        return None
-
-    @staticmethod
-    def _override_standard_name(override_name):
-        """Standard mdoc name for a Tomo5 override, e.g.
-        'Position_1_override.mdoc' -> 'Position_1.mdoc'."""
-        return override_name[:-len("_override.mdoc")] + ".mdoc"
-
-    def plan_sort(self, src):
-        """Preview of sort_files:
-        {frames, mdocs, gains, overrides, skipped} lists of filenames."""
-        plan = {"frames": [], "mdocs": [], "gains": [], "overrides": [], "skipped": []}
-        src = Path(src)
-        if not src.is_dir():
-            return plan
-        for f in sorted(src.iterdir()):
-            if not f.is_file():
-                continue
-            if f.name.lower().endswith("_override.mdoc"):
-                plan["overrides"].append(f.name)
-                continue
-            bucket = self._sort_bucket(f.name)
-            plan[bucket if bucket else "skipped"].append(f.name)
-        return plan
-
-    def clean_override_mdocs(self, folder):
-        """Quarantine Tomo5 *_override.mdoc that are byte-identical to their
-        standard mdoc into mdocs/bad/ — they otherwise make the rename script
-        consume bogus position numbers. Overrides that DIFFER (or have no
-        standard) are left in place. Returns (removed, kept)."""
-        folder = Path(folder)
-        bad = self.root / "mdocs" / "bad"
-        bad.mkdir(parents=True, exist_ok=True)
-        removed = kept = 0
-        for ov in sorted(folder.glob("*_override.mdoc")):
-            std = folder / self._override_standard_name(ov.name)
-            identical = std.is_file() and filecmp.cmp(str(ov), str(std), shallow=False)
-            if identical:
-                dest = bad / ov.name
-                if dest.exists():
-                    continue
-                try:
-                    shutil.move(str(ov), str(dest))
-                    removed += 1
-                except OSError:
-                    pass
-            else:
-                kept += 1
-        return removed, kept
-
-    def sort_files(self, src):
-        """Make the standard dirs and move files from src into frames/ (.eer),
-        mdocs/ (.mdoc), gains/ (gain). Dedups Tomo5 *_override.mdoc first.
-        Never overwrites an existing target. Returns a counts dict.
-
-        NOTE: this SPLITS .eer and .mdoc apart, so run it AFTER rename (the
-        rename script needs them in one folder)."""
-        self.initialize_structure()
-        src = Path(src)
-        removed, kept = self.clean_override_mdocs(src)
-        plan = self.plan_sort(src)                       # re-plan after cleanup
-        moved = {"frames": 0, "mdocs": 0, "gains": 0,
-                 "overrides_removed": removed, "overrides_kept": kept}
-        for bucket in ("frames", "mdocs", "gains"):
-            dest_dir = self.root / bucket
-            for name in plan[bucket]:
-                s = src / name
-                d = dest_dir / name
-                if not s.is_file():
-                    continue
-                try:
-                    if d.exists() or s.resolve() == d.resolve():
-                        continue       # don't overwrite / no-op if already there
-                    shutil.move(str(s), str(d))
-                    moved[bucket] += 1
-                except OSError:
-                    pass
-        return moved
-
-    # ---- visual tilt inspection support ---------------------------------
-    def find_thumbnails_dir(self):
-        """Locate the Tomo5 Thumbnails/ folder (per-series montage .mrc).
-        Checks the root and one level down. Returns a Path or None."""
-        direct = self.root / "Thumbnails"
-        if direct.is_dir():
-            return direct
-        for d in sorted(self.root.iterdir()) if self.root.is_dir() else []:
-            if d.is_dir():
-                cand = d / "Thumbnails"
-                if cand.is_dir():
-                    return cand
-        return None
-
-    def load_listfile(self):
-        """Parse listfile_*.txt (old_name -> new_name) into {tomo5: renamed}."""
-        mapping = {}
-        if not self.root.is_dir():
-            return mapping
-        candidates = list(self.root.glob("listfile_*.txt")) + [self.root / "listfile.txt"]
-        for path in candidates:
-            if not path.is_file():
-                continue
-            for line in path.read_text(errors="replace").splitlines():
-                s = line.strip()
-                if not s or s.startswith("#"):
-                    continue
-                parts = s.split()
-                if len(parts) >= 2:
-                    mapping[parts[0]] = parts[1]
-            if mapping:
-                break
-        return mapping
-
-    def load_listfile_reverse(self):
-        """{renamed -> original_tomo5}, read directly from the file so a merged
-        dataset (where several grids may share a Tomo5 name) still maps each unique
-        renamed Position### back to the right original. Used for the inspector's
-        'was <Tomo5>' conversion note."""
-        rev = {}
-        if not self.root.is_dir():
-            return rev
-        candidates = list(self.root.glob("listfile_*.txt")) + [self.root / "listfile.txt"]
-        for path in candidates:
-            if not path.is_file():
-                continue
-            for line in path.read_text(errors="replace").splitlines():
-                s = line.strip()
-                if not s or s.startswith("#"):
-                    continue
-                parts = s.split()
-                if len(parts) >= 2:
-                    rev[parts[1]] = parts[0]      # renamed -> tomo5
-            if rev:
-                break
-        return rev
-
-    def find_series_stack(self, tomo5_name, renamed):
-        """Full-res per-series .mrc to open in 3dmod (renamed first, then Tomo5,
-        then the thumbnail montage). Returns a Path or None."""
-        for cand in (self.root / f"{renamed}.mrc",
-                     self.root / f"{tomo5_name}.mrc"):
-            if cand.is_file():
-                return cand
-        thumbs = self.find_thumbnails_dir()
-        if thumbs:
-            t = thumbs / f"{tomo5_name}.mrc"
-            if t.is_file():
-                return t
-        return None
-
-    def write_manual_exclusions(self, mapping):
-        """Merge {position: 'tilt,tilt'} into the MANUAL section of
-        exclusion_list.txt (above AUTO_EXCLUSION_HEADER), preserving the auto
-        section. position is the RENAMED name; tilts are IMOD-order numbers."""
-        path = self.root / "exclusion_list.txt"
-        existing = path.read_text() if path.exists() else ""
-        if self.AUTO_EXCLUSION_HEADER in existing:
-            manual, auto = existing.split(self.AUTO_EXCLUSION_HEADER, 1)
-            auto = self.AUTO_EXCLUSION_HEADER + auto
-        else:
-            manual, auto = existing, ""
-        current = {}
-        for line in manual.splitlines():
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            parts = s.split(None, 1)
-            current[parts[0]] = parts[1].strip().rstrip(",") if len(parts) > 1 else ""
-        for pos, tilts in mapping.items():
-            current[pos] = str(tilts).strip().rstrip(",")
-        # Expand ranges (1,4-12,48 -> explicit list) — remake_mdocs can't parse
-        # ranges. Normalises any pre-existing ranged entries too.
-        lines = []
-        for pos in sorted(current):
-            expanded = expand_tilt_ranges(current[pos])
-            if expanded:
-                lines.append(f"{pos}\t{expanded}")
-        new_manual = "\n".join(lines) + ("\n" if lines else "")
-        path.write_text(new_manual + (auto if auto.strip() else ""))
-        return len(lines)
-
-    def is_series_excluded(self, renamed):
-        """True if this series was quarantined (its mdoc is now in mdocs/bad/)."""
-        return (self.root / "mdocs" / "bad" / f"{renamed}.mdoc").is_file()
-
-    def output_versions(self, output_spec):
-        """[(label, Path), …] of existing output dirs for a stage, newest last.
-        'aretomo' -> the versioned AreTomo folders; otherwise the single dir."""
-        if output_spec == "aretomo":
-            return [(p.name, p) for p in self.list_aretomo_versions()]
-        base = self.root / output_spec
-        if base.is_dir():
-            return [("(root)" if output_spec == "." else output_spec, base)]
-        return []
-
-    def quarantine_series(self, renamed):
-        """Exclude a whole tilt series: move its mdoc -> mdocs/bad/ and its .eer
-        -> frames/bad/ (wherever they currently live). Returns (mdocs, eers)."""
-        (self.root / "mdocs" / "bad").mkdir(parents=True, exist_ok=True)
-        (self.root / "frames" / "bad").mkdir(parents=True, exist_ok=True)
-        n_mdoc = n_eer = 0
-        for mdoc in (self.root / "mdocs" / f"{renamed}.mdoc",
-                     self.root / f"{renamed}.mdoc"):
-            if mdoc.is_file():
-                try:
-                    mdoc.rename(self.root / "mdocs" / "bad" / mdoc.name)
-                    n_mdoc += 1
-                except OSError:
-                    pass
-        for folder in (self.root / "frames", self.root):
-            if folder.is_dir():
-                for eer in folder.glob(f"{renamed}_*.eer"):
-                    try:
-                        eer.rename(self.root / "frames" / "bad" / eer.name)
-                        n_eer += 1
-                    except OSError:
-                        pass
-        return n_mdoc, n_eer
-
-    def quarantine_listed_whole_series(self):
-        """Quarantine every MANUAL exclusion-list line that names a series with NO
-        tilt numbers — i.e. a bare 'PositionNNN' line means 'drop the whole series'.
-        Returns the list of names quarantined. Called just before _normalize_exclusions
-        (which would otherwise silently drop the tilt-less lines, since the remake
-        script only trims individual tilts). Idempotent: already-excluded series are
-        skipped. Lines WITH tilt numbers are left for Remake mdocs to apply."""
-        path = self.root / "exclusion_list.txt"
-        if not path.is_file():
-            return []
-        text = path.read_text()
-        if self.AUTO_EXCLUSION_HEADER in text:
-            text = text.split(self.AUTO_EXCLUSION_HEADER, 1)[0]
-        done = []
-        for line in text.splitlines():
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            parts = s.split(None, 1)
-            tilts = parts[1].strip().rstrip(",") if len(parts) > 1 else ""
-            if tilts:                       # has tilt numbers → Remake handles it
-                continue
-            name = parts[0]
-            if self.is_series_excluded(name):
-                continue
-            nm, ne = self.quarantine_series(name)
-            if nm or ne:
-                done.append(name)
-        return done
-
-    # ---- mdoc surgical editing (brief gotcha §4.3) -----------------------
-    @staticmethod
-    def remove_mdoc_zvalue_block(mdoc_path, eer_basename):
-        """Remove the ZValue block referencing eer_basename and renumber the
-        remaining [ZValue = N] blocks contiguously from 0. Returns True/False."""
-        if not os.path.isfile(mdoc_path):
-            return False
-        with open(mdoc_path, errors="replace") as f:
-            lines = f.readlines()
-        header_end = None
-        for i, line in enumerate(lines):
-            if line.lstrip().startswith("[ZValue"):
-                header_end = i
-                break
-        if header_end is None:
-            return False
-        header, rest = lines[:header_end], lines[header_end:]
-        blocks, current = [], []
-        for line in rest:
-            if line.lstrip().startswith("[ZValue") and current:
-                blocks.append(current)
-                current = [line]
-            else:
-                current.append(line)
-        if current:
-            blocks.append(current)
-        target_idx = None
-        for i, blk in enumerate(blocks):
-            if eer_basename in "".join(blk):
-                target_idx = i
-                break
-        if target_idx is None:
-            return False
-        kept = blocks[:target_idx] + blocks[target_idx + 1:]
-        renumbered = []
-        for new_idx, blk in enumerate(kept):
-            replaced = False
-            for line in blk:
-                stripped = line.lstrip()
-                if not replaced and stripped.startswith("[ZValue"):
-                    leading = line[:len(line) - len(stripped)]
-                    renumbered.append(f"{leading}[ZValue = {new_idx}]\n")
-                    replaced = True
-                else:
-                    renumbered.append(line)
-        with open(mdoc_path, "w") as f:
-            f.writelines(header)
-            f.writelines(renumbered)
-        return True
-
-    def repair_all_mdocs(self):
-        """Strip ZValue blocks referencing .eer files no longer in frames/.
-        Returns [(position, eer_basename), ...] for everything removed."""
-        removed = []
-        mdocs_dir = self.root / "mdocs"
-        frames_dir = self.root / "frames"
-        if not mdocs_dir.is_dir() or not frames_dir.is_dir():
-            return removed
-        present = {f.name for f in frames_dir.glob("*.eer")}
-        for mdoc in sorted(mdocs_dir.glob("Position*.mdoc")):
-            while True:
-                changed = False
-                for acq, angle, subframe in self.parse_mdoc_subframes(str(mdoc)):
-                    if subframe and subframe not in present:
-                        if self.remove_mdoc_zvalue_block(str(mdoc), subframe):
-                            removed.append((mdoc.stem, subframe))
-                            changed = True
-                            break
-                if not changed:
-                    break
-        return removed
-
-    def dry_run_repair_mdocs(self):
-        """Preview of repair_all_mdocs: list of (mdoc_name, subframe) stale entries."""
-        to_remove = []
-        mdocs_dir = self.root / "mdocs"
-        frames_dir = self.root / "frames"
-        if not mdocs_dir.is_dir() or not frames_dir.is_dir():
-            return to_remove
-        present = {f.name for f in frames_dir.glob("*.eer")}
-        for mdoc in sorted(mdocs_dir.glob("Position*.mdoc")):
-            for acq, angle, subframe in self.parse_mdoc_subframes(str(mdoc)):
-                if subframe and subframe not in present:
-                    to_remove.append((mdoc.name, subframe))
-        return to_remove
-
-    # ---- auto-exclusion logging (brief gotcha §4.5) ----------------------
-    def append_auto_exclusion(self, eer_basename, reason, position=None,
-                              tilt_angle=None):
-        """Append an entry below AUTO_EXCLUSION_HEADER in exclusion_list.txt.
-        Idempotent on filename. Manual exclusions above the header are left
-        untouched (remake_mdocs must stop parsing at the header)."""
-        path = self.root / "exclusion_list.txt"
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        existing = path.read_text() if path.exists() else ""
-        if self.AUTO_EXCLUSION_HEADER in existing:
-            manual_part, auto_part = existing.split(self.AUTO_EXCLUSION_HEADER, 1)
-        else:
-            manual_part, auto_part = existing, ""
-        if eer_basename in auto_part:
-            return False
-        bits = [f"# {timestamp}"]
-        if position:
-            bits.append(f"position={position}")
-        if tilt_angle is not None:
-            bits.append(f"tilt={tilt_angle}")
-        bits.append(f"reason={reason}")
-        new_entry = f"{' '.join(bits)}\n{eer_basename}\n"
-        manual_part = manual_part.rstrip() + "\n" if manual_part.strip() else ""
-        new_auto = (auto_part.rstrip() + "\n" + new_entry
-                    if auto_part.strip() else "\n" + new_entry)
-        path.write_text(manual_part + self.AUTO_EXCLUSION_HEADER + new_auto)
-        return True
-
-    # ---- project save/load ----------------------------------------------
-    def initialize_structure(self):
-        for d in EXPECTED_DIRS:
-            (self.root / d).mkdir(parents=True, exist_ok=True)
-
-    def save_project(self, settings_dict):
-        state_file = self.root / "warp_auto.project.json"
-        state_file.write_text(json.dumps({
-            "saved_at": datetime.datetime.now().isoformat(),
-            "settings": settings_dict,
-        }, indent=2))
-        return state_file
-
-    def load_project(self):
-        state_file = self.root / "warp_auto.project.json"
-        return json.loads(state_file.read_text()) if state_file.exists() else None
-
-    # ---- tilt-series groups (process named subsets for optimization) ------
-    GROUPS_FILE = ".tomogration_groups.json"
-    ALL_GROUP = "All tilt series"
-
-    def load_groups(self):
-        """{'active': name, 'groups': {name: [series, ...]}}. 'All tilt series'
-        is implicit (no restriction)."""
-        p = self.root / self.GROUPS_FILE
-        if p.is_file():
-            try:
-                d = json.loads(p.read_text())
-                if isinstance(d, dict) and isinstance(d.get("groups"), dict):
-                    d.setdefault("active", self.ALL_GROUP)
-                    return d
-            except (OSError, ValueError):
-                pass
-        return {"active": self.ALL_GROUP, "groups": {}}
-
-    def save_groups(self, data):
-        (self.root / self.GROUPS_FILE).write_text(json.dumps(data, indent=2))
-
-    def available_tiltseries(self):
-        """Sorted unique tilt-series base names — from tomostar/ if present,
-        else mdocs/, else frames/ (so groups work at any stage)."""
-        names = set()
-        td = self.root / "tomostar"
-        if td.is_dir():
-            names |= {f.stem for f in td.glob("*.tomostar")}
-        md = self.root / "mdocs"
-        if md.is_dir():
-            names |= {f.stem for f in md.glob("Position*.mdoc")}
-        if not names:
-            fd = self.root / "frames"
-            if fd.is_dir():
-                names |= {f.name.split("_")[0] for f in fd.glob("Position*.eer")}
-        return sorted(names)
-
-    def write_group_inputs(self, series):
-        """Materialise a group into WarpTools --input_data lists. Returns
-        {'ts': path|None, 'fs': path|None}. WarpTools resolves --input_data
-        entries RELATIVE TO THE PROJECT ROOT, so paths include the data folder:
-        ts = 'tomostar/<name>.tomostar' per line; fs = 'frames/<eer>' per line
-        (the .eer of each series, read from its mdoc)."""
-        out = {"ts": None, "fs": None}
-        series = [s for s in series if s]
-        if not series:
-            return out
-        ts_path = self.root / ".group_tiltseries.txt"
-        ts_path.write_text("\n".join(f"tomostar/{n}.tomostar" for n in series) + "\n")
-        out["ts"] = ts_path
-        eers = []
-        md = self.root / "mdocs"
-        for n in series:
-            mdoc = md / f"{n}.mdoc"
-            if mdoc.is_file():
-                eers += [f"frames/{sub}" for _, _, sub
-                         in self.parse_mdoc_subframes(str(mdoc)) if sub]
-        if eers:
-            fs_path = self.root / ".group_frameseries.txt"
-            fs_path.write_text("\n".join(eers) + "\n")
-            out["fs"] = fs_path
-        return out
-
-    def group_dir(self, name):
-        """Path where materialize_group would build this group's subset folder."""
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name)).strip("_") or "group"
-        return self.root / "groups" / safe
-
-    def materialize_group(self, name, series):
-        """Build a self-contained working folder for a group at groups/<name>/,
-        SYMLINKING the group's frames (.eer) + mdocs (.mdoc) + gains into it, so
-        the whole pipeline can run on just that subset (set it as the project
-        root). Returns (path, n_eer, n_mdoc). Symlinks, not copies — no extra disk."""
-        base = self.group_dir(name)
-        for sub in ("frames", "mdocs", "gains"):
-            (base / sub).mkdir(parents=True, exist_ok=True)
-        frames, mdocs, gains = (self.root / "frames", self.root / "mdocs",
-                                self.root / "gains")
-        n_eer = n_mdoc = 0
-        for s in series:
-            md = mdocs / f"{s}.mdoc"
-            if md.is_file() and self._symlink(md, base / "mdocs" / md.name):
-                n_mdoc += 1
-            if frames.is_dir():
-                for eer in frames.glob(f"{s}_*.eer"):
-                    if self._symlink(eer, base / "frames" / eer.name):
-                        n_eer += 1
-        if gains.is_dir():
-            for g in gains.iterdir():
-                if g.is_file():
-                    self._symlink(g, base / "gains" / g.name)
-        return base, n_eer, n_mdoc
-
-    @staticmethod
-    def _symlink(src, dst):
-        try:
-            if dst.exists() or dst.is_symlink():
-                return True
-            dst.symlink_to(Path(src).resolve())
-            return True
-        except OSError:
-            return False
-
-
-# ===========================================================================
-# Stage definitions  (declarative — extend the pipeline by adding a dict)
-#
-# Schema (copy ts_reconstruct as the template):
-#   group/id/label : center-axis grouping + node identity
-#   base           : command head. Empty for env-only/positional commands.
-#   params[]:
-#     name         : control label + key
-#     kind         : "text" | "slider_int" | "check" | "env" | "env_int"
-#     flag         : CLI flag (e.g. "--perdevice"). None = positional value.
-#                    For env/env_int kinds, flag is the VAR name (VAR=value).
-#     default/min/max/step  : widget config
-#     help         : inline description + range + effect (shown under control)
-#   validate(values)->str   : optional live red warning under the form
-#   docs           : what / range / effect / pitfall  (LEFT panel)
-#   status(ps)->(truthy,label) : drives the node status dot via file existence
-#   aretomo / auto_recover / sync_helper : special-behaviour flags
-#
-# Param-widget honesty (brief §5): sliders only for bounded numerics (B-factor,
-# threshold, binning, perdevice); checkboxes for boolean flags; everything else
-# (paths, patterns, grids like 2x2x1, env 0/1 toggles) stays free-text. The
-# editable command box at the bottom of each form is the single source of truth.
-# ===========================================================================
-STAGES = [
-    # ---------------- 1. Data prep ----------------
-    {
-        "group": "1. Data prep", "id": "rename", "label": "Rename .eer/.mdoc",
-        "base": f'bash {_pkg_script("ml_batch_rename_eer_mdoc_mrc_warp_auto.sh")}',
-        "clean_overrides": True,
-        "params": [
-            {"name": "source_dir", "kind": "text", "flag": None,
-             "default": ".",
-             "help": "Folder with the raw Tomo5 .eer + .mdoc (+ .mrc) TOGETHER, "
-                     "relative to the project root. '.' = the project root itself "
-                     "(use this when the root IS your acquisition folder). Run this "
-                     "BEFORE Sort files — rename needs .eer and .mdoc in one folder."},
-            {"name": "rootname", "kind": "text", "flag": None,
-             "default": "Position", "help": "Prefix for renamed files (e.g. Position, TS)."},
-            {"name": "start_number", "kind": "text", "flag": None,
-             "default": "0", "help": "Starting counter (0 -> first output is 001)."},
-        ],
-        "docs": {
-            "what": "Renames Tomo5 beam-shift names (Position_1_2) to Warp form "
-                    "(Position001). Writes listfile_<root>.txt mapping old->new "
-                    "and fixes mdoc dates to yy-mmm-dd (required by Warp).",
-            "range": "n/a",
-            "effect": "listfile is required later to translate IMOD-order exclusion tables.",
-            "pitfall": "ORDER: rename FIRST (on the raw folder, .eer+.mdoc together), "
-                       "THEN Sort files to split into frames/ + mdocs/. Renames IN "
-                       "PLACE — work on a copy. Identical Tomo5 *_override.mdoc are "
-                       "auto-moved to mdocs/bad/ before renaming (they would consume "
-                       "position numbers). No 'selected/' folder is needed.",
-        },
-        "status": lambda ps: ps.status_listfile(),
-    },
-    {
-        "group": "1. Data prep", "id": "imod_warp_key", "label": "IMOD→Warp key",
-        "base": f'python {_pkg_script("ml_imodtowarpkey_generator_warp_auto.py")}',
-        "params": [
-            {"name": "input_mdoc", "kind": "text", "flag": None,
-             "default": "mdocs/Position001.mdoc",
-             "help": "A COMPLETE reference mdoc (all tilts present)."},
-            {"name": "output_key", "kind": "text", "flag": None,
-             "default": "new_imod_conv_key.txt",
-             "help": "Where to write the IMOD->acquisition-order key."},
-        ],
-        "docs": {
-            "what": "Builds the IMOD->Warp tilt-number key. mdoc ZValue blocks "
-                    "are in dose-symmetric acquisition order; 3dmod shows tilts "
-                    "in angle order. The key translates between them.",
-            "range": "n/a",
-            "effect": "Used by remake_mdocs to map IMOD-order exclusions to acq order.",
-            "pitfall": "Use a mdoc with EVERY tilt present, or the mapping is wrong.",
-        },
-        "status": lambda ps: ps.status_conv_key(),
-    },
-    {
-        "group": "1. Data prep", "id": "inspect_select",
-        "label": "Inspect tilt stacks",
-        "tool": "inspector",
-        "docs": {
-            "what": "Visually review each tilt series (thumbnail grid + 3dmod) and "
-                    "mark bad tilts (IMOD #, ranges OK e.g. 1,4-12,48) or whole "
-                    "series for exclusion before remaking the mdocs.",
-            "range": "n/a",
-            "effect": "Tilt exclusions feed exclusion_list.txt (Remake mdocs applies "
-                      "them); excluded whole series move to mdocs/bad/ + frames/bad/. "
-                      "You can also hand-edit exclusion_list.txt: 'PositionNNN<tab>1,4-12' "
-                      "trims those tilts; a bare 'PositionNNN' line drops the whole series.",
-            "pitfall": "Do this BEFORE Remake mdocs. Already-excluded series are "
-                       "flagged ✗EXCLUDED. Tip: 'Open ALL in 3dmod + list' opens "
-                       "every series in one 3dmod next to a compact type-in list.",
-        },
-        "status": lambda ps: ps.status_exclusions(),
-    },
-    {
-        "group": "1. Data prep", "id": "remake_mdocs", "label": "Remake mdocs",
-        "base": f'bash {_pkg_script("ml_batch_remake_mdocs_warp_auto.sh")}',
-        # The script cd's into mdocs/ then reads these by name, so pass them
-        # absolute or they're looked up inside mdocs/ and not found.
-        "abs_paths": ["mdocs_dir", "exclusion_list", "conv_key"],
-        # Expand tilt ranges (1-3) in exclusion_list.txt first — the script
-        # can't parse ranges (sed chokes on "1-3p").
-        "normalize_exclusions": True,
-        "params": [
-            {"name": "mdocs_dir", "kind": "text", "flag": None,
-             "default": "mdocs", "help": "Dir with <root>NNN.mdoc files."},
-            {"name": "exclusion_list", "kind": "text", "flag": None,
-             "default": "exclusion_list.txt",
-             "help": "Manual tilt exclusions (IMOD order), above the auto header."},
-            {"name": "conv_key", "kind": "text", "flag": None,
-             "default": "new_imod_conv_key.txt", "help": "IMOD->acq key file."},
-            {"name": "rootname", "kind": "text", "flag": None,
-             "default": "Position", "help": "File prefix (optional)."},
-        ],
-        "docs": {
-            "what": "Removes excluded tilts from mdocs and renumbers remaining "
-                    "ZValue blocks contiguously, then fixes mdoc date format.",
-            "range": "n/a",
-            "effect": "Quarantining a tilt without fixing the mdoc breaks ts_import.",
-            "pitfall": "exclusion_list.txt: manual tilt numbers go ABOVE the "
-                       "auto-excluded header; the script stops parsing at it. A bare "
-                       "'PositionNNN' line (no tilts) is applied on enqueue by "
-                       "quarantining that whole series (mdoc/.eer → bad/). "
-                       "For files already moved to frames/bad/, use 'Repair mdocs'.",
-        },
-        "status": lambda ps: ps.status_mdocs(),
-    },
-
-    # ---------------- 2. Gain ----------------
-    {
-        "group": "2. Gain", "id": "gain_convert", "label": "gain .gain→.mrc",
-        "base": "module load eman && e2proc3d.py",
-        "params": [
-            {"name": "in_gain", "kind": "text", "flag": None,
-             "default": "gains/original.gain", "help": "Input .gain reference."},
-            {"name": "out_mrc", "kind": "text", "flag": None,
-             "default": "gains/original_gain.mrc", "help": "Output .mrc gain."},
-        ],
-        "docs": {
-            "what": "Converts a camera .gain reference to .mrc via EMAN2.",
-            "range": "n/a",
-            "effect": "Produces the .mrc that the reciprocal step inverts.",
-            "pitfall": "Needs `module load eman`. This is the NON-reciprocal gain.",
-        },
-        "status": lambda ps: ps.status_gain_original(),
-    },
-    {
-        "group": "2. Gain", "id": "gain_reciprocal", "label": "reciprocal gain",
-        "base": "module load eman && e2proc2d.py",
-        "params": [
-            {"name": "in_mrc", "kind": "text", "flag": None,
-             "default": "gains/original_gain.mrc", "help": "Input .mrc gain."},
-            {"name": "out_reciprocal", "kind": "text", "flag": None,
-             "default": "gains/gain_reciprocal.mrc", "help": "Output reciprocal gain."},
-            {"name": "reciprocal", "kind": "check", "flag": "--process math.reciprocal",
-             "default": True, "help": "Take the per-pixel reciprocal."},
-        ],
-        "docs": {
-            "what": "Computes the reciprocal gain that Linux WarpTools expects.",
-            "range": "n/a",
-            "effect": "create_settings --gain_path must point at THIS file.",
-            "pitfall": "Linux WarpTools wants the reciprocal; using the plain gain "
-                       "double-applies the correction.",
-        },
-        "status": lambda ps: ps.status_gain_reciprocal(),
-    },
-
-    # ---------------- 3. Frameseries ----------------
-    {
-        "group": "3. Frameseries", "id": "create_settings_fs",
-        "label": "create_settings (fs)",
-        "base": "WarpTools create_settings",
-        "params": [
-            {"name": "folder_data", "kind": "text", "flag": "--folder_data",
-             "default": "frames", "help": "Raw .eer folder."},
-            {"name": "folder_processing", "kind": "text", "flag": "--folder_processing",
-             "default": "warp_frameseries", "help": "Processing output folder."},
-            {"name": "output", "kind": "text", "flag": "--output",
-             "default": "warp_frameseries.settings", "help": "Settings file to write."},
-            {"name": "extension", "kind": "text", "flag": "--extension",
-             "default": "*.eer", "help": "Input file glob."},
-            {"name": "angpix", "kind": "text", "flag": "--angpix",
-             "default": "1.57", "help": "Pixel size (Å/px). This dataset: 1.57."},
-            {"name": "gain_path", "kind": "text", "flag": "--gain_path",
-             "default": "gains/gain_reciprocal.mrc",
-             "help": "RECIPROCAL gain (Linux WarpTools)."},
-            {"name": "exposure", "kind": "text", "flag": "--exposure",
-             "default": "3.5", "help": "Dose per TILT (e/Å², not per frame)."},
-            {"name": "eer_ngroups", "kind": "text", "flag": "--eer_ngroups",
-             "default": "10", "help": "EER frame groups."},
-        ],
-        "docs": {
-            "what": "Writes the Warp frame-series .settings file.",
-            "range": "apix 1.57; dose 3.5 e/Å²/tilt; eer_ngroups 10.",
-            "effect": "Every downstream fs_* step reads these settings.",
-            "pitfall": "Point gain_path at the RECIPROCAL gain; dose is per tilt.",
-        },
-        "status": lambda ps: ps.status_fs_settings(),
-    },
-    {
-        "group": "3. Frameseries", "id": "fs_motion_and_ctf",
-        "label": "fs_motion_and_ctf",
-        "base": "WarpTools fs_motion_and_ctf",
-        "auto_recover": True,
-        "group_scope": "fs",
-        "params": [
-            {"name": "settings", "kind": "text", "flag": "--settings",
-             "default": "warp_frameseries.settings", "help": "fs .settings file."},
-            {"name": "m_grid", "kind": "text", "flag": "--m_grid",
-             "default": "1x1x3", "help": "Motion grid XxYxT; temporal ≈ frame count."},
-            {"name": "c_grid", "kind": "text", "flag": "--c_grid",
-             "default": "2x2x1", "help": "CTF grid XxYxT (not slider-able)."},
-            {"name": "m_range_min", "kind": "text", "flag": "--m_range_min",
-             "default": "500", "help": "Motion fit low-res bound (Å)."},
-            {"name": "m_range_max", "kind": "text", "flag": "--m_range_max",
-             "default": "10", "help": "Motion fit high-res bound (Å)."},
-            {"name": "m_bfac", "kind": "slider_int", "flag": "--m_bfac",
-             "default": -500, "min": -1000, "max": 0, "step": 50,
-             "help": "Motion B-factor; more negative = stronger low-pass."},
-            {"name": "c_range_max", "kind": "text", "flag": "--c_range_max",
-             "default": "7", "help": "CTF fit max resolution (Å)."},
-            {"name": "c_defocus_max", "kind": "text", "flag": "--c_defocus_max",
-             "default": "8", "help": "Max defocus to search (µm)."},
-            {"name": "out_averages", "kind": "check", "flag": "--out_averages",
-             "default": True, "help": "Write aligned averages. REQUIRED — ts_import "
-             "needs them ('no aligned average result' error if off)."},
-            {"name": "out_average_halves", "kind": "check", "flag": "--out_average_halves",
-             "default": True, "help": "Write odd/even half-averages (for Noise2Noise "
-             "denoising)."},
-            {"name": "device_list", "kind": "text", "flag": "--device_list", "gpu_sep": " ",
-             "default": "0", "help": "GPU id(s), e.g. 0 or '0 1'."},
-            {"name": "perdevice", "kind": "slider_int", "flag": "--perdevice",
-             "default": 2, "min": 1, "max": 4, "step": 1,
-             "help": "Workers per GPU (no deconv here, so 2 is fine)."},
-        ],
-        "docs": {
-            "what": "Per-frame-series motion correction + CTF estimation.",
-            "range": "motion grid 1x1x3; CTF grid 2x2x1; m_range 500→10 Å; m_bfac −500.",
-            "effect": "Finer grids model more local motion/CTF, at higher cost.",
-            "pitfall": "Auto-recovery is ON: a cuFFT crash on a bad .eer is "
-                       "quarantined to frames/bad/, its mdoc ZValue block removed, "
-                       "logged to exclusion_list.txt, and the run retried. Only "
-                       "fs_* recovers — ts_* crashes are GPU/resource, not bad files.",
-        },
-        "status": lambda ps: ps.status_fs_motion_ctf(),
-    },
-
-    # ---------------- 4. Tilt series ----------------
-    {
-        "group": "4. Tilt series", "id": "create_settings_ts",
-        "label": "create_settings (ts)",
-        "base": "WarpTools create_settings",
-        "params": [
-            {"name": "folder_data", "kind": "text", "flag": "--folder_data",
-             "default": "tomostar", "help": "tomostar folder."},
-            {"name": "folder_processing", "kind": "text", "flag": "--folder_processing",
-             "default": "warp_tiltseries", "help": "Processing output folder."},
-            {"name": "output", "kind": "text", "flag": "--output",
-             "default": "warp_tiltseries.settings", "help": "Settings file to write."},
-            {"name": "extension", "kind": "text", "flag": "--extension",
-             "default": "*.tomostar", "help": "Input glob."},
-            {"name": "angpix", "kind": "text", "flag": "--angpix",
-             "default": "1.57", "help": "Pixel size (Å/px)."},
-            {"name": "gain_path", "kind": "text", "flag": "--gain_path",
-             "default": "gains/gain_reciprocal.mrc", "help": "Reciprocal gain."},
-            {"name": "exposure", "kind": "text", "flag": "--exposure",
-             "default": "3.5", "help": "Dose per tilt (e/Å²)."},
-            {"name": "tomo_dimensions", "kind": "text", "flag": "--tomo_dimensions",
-             "default": "4096x4096x3088", "help": "Tomogram dims XxYxZ (unbinned)."},
-        ],
-        "docs": {
-            "what": "Writes the Warp tilt-series .settings file.",
-            "range": "tomo_dimensions XxYxZ; apix 1.57.",
-            "effect": "Every ts_* step reads these settings.",
-            "pitfall": "Z dimension must exceed the lamella thickness.",
-        },
-        "status": lambda ps: ps.status_ts_settings(),
-    },
-    {
-        "group": "4. Tilt series", "id": "ts_import", "label": "ts_import",
-        "base": "WarpTools ts_import",
-        "params": [
-            {"name": "mdocs", "kind": "text", "flag": "--mdocs",
-             "default": "mdocs", "help": "Mdocs folder."},
-            {"name": "frameseries", "kind": "text", "flag": "--frameseries",
-             "default": "warp_frameseries", "help": "Frameseries processing folder."},
-            {"name": "tilt_exposure", "kind": "text", "flag": "--tilt_exposure",
-             "default": "3.5", "help": "Dose per tilt (e/Å²)."},
-            {"name": "min_intensity", "kind": "text", "flag": "--min_intensity",
-             "default": "0", "help": "Min intensity filter."},
-            {"name": "dont_invert", "kind": "check", "flag": "--dont_invert",
-             "default": True, "help": "Keep tilt polarity as-is (dataset-specific)."},
-            {"name": "output", "kind": "text", "flag": "--output",
-             "default": "tomostar", "help": "tomostar output folder."},
-            {"name": "override_axis", "kind": "text", "flag": "--override_axis",
-             "default": "", "help": "Tilt-AXIS rotation (deg) — the IN-PLANE angle of the "
-             "tilt axis, NOT the stage tilt range. Blank = use the mdoc value (fine: it's "
-             "only the STARTING guess; AreTomo then searches & refines it). Set a number "
-             "only if you know the correct axis (e.g. from AreTomo's solved .aln)."},
-        ],
-        "docs": {
-            "what": "Builds .tomostar files by pairing mdocs with frameseries.",
-            "range": "n/a",
-            "effect": "tomostar is the unit AreTomo and ts_* operate on.",
-            "pitfall": "Fails with 'failed to parse specific tilts' when a "
-                       "quarantined .eer left a stale mdoc ZValue block — run "
-                       "'Repair mdocs' first (brief gotcha §4.3). The 'tilt axis angle … "
-                       "Tomo5 mdoc files are known to provide incorrect values' message is "
-                       "ADVISORY — printed for every Tomo5 mdoc, not a detected error; the "
-                       "axis is the in-plane rotation (e.g. ~-174°), and AreTomo refines it, "
-                       "so blank is usually right. Override only with a known-good value.",
-        },
-        "status": lambda ps: ps.status_tomostar(),
-    },
-    {
-        "group": "4. Tilt series", "id": "ts_stack", "label": "ts_stack",
-        "base": "WarpTools ts_stack",
-        "group_scope": "ts",
-        "params": [
-            {"name": "settings", "kind": "text", "flag": "--settings",
-             "default": "warp_tiltseries.settings", "help": "ts .settings file."},
-            {"name": "angpix", "kind": "text", "flag": "--angpix",
-             "default": "", "help": "Output pixel size (Å/px). Blank = native."},
-            {"name": "device_list", "kind": "text", "flag": "--device_list", "gpu_sep": " ",
-             "default": "0", "help": "GPU id(s)."},
-            {"name": "perdevice", "kind": "slider_int", "flag": "--perdevice",
-             "default": 2, "min": 1, "max": 4, "step": 1, "help": "Workers per GPU."},
-        ],
-        "docs": {
-            "what": "Builds aligned tilt stacks (.st) per tilt series for AreTomo.",
-            "range": "n/a",
-            "effect": "Produces warp_tiltseries/tiltstack/<Position>/<Position>.st.",
-            "pitfall": "Run ts_import first; a missing mdoc entry stalls a stack.",
-        },
-        "status": lambda ps: ps.status_ts_stacks(),
-    },
-
-    # ---------------- 5. Alignment ----------------
-    {
-        "group": "5. Alignment", "id": "aretomo", "label": "Align with AreTomo2",
-        "base": "bash",
-        "aretomo": True,
-        "params": [
-            {"name": "script", "kind": "text", "flag": None,
-             "default": _pkg_script("ml_aretomo2_warp_auto.sh"),
-             "help": "AreTomo2 wrapper script (shipped with the app)."},
-            {"name": "input_dir", "kind": "text", "flag": None,
-             "default": "warp_tiltseries/tiltstack", "help": "Folder of <Pos>/<Pos>.st."},
-            {"name": "output_dir", "kind": "text", "flag": None,
-             "default": "aretomo_output",
-             "help": "Versioned output folder (auto-bumped to -vN; PARAMETERS.txt written here)."},
-            {"name": "gpu", "kind": "text", "flag": None,
-             "default": "0", "help": "Fallback SINGLE GPU id, used only if the 'GPUs' "
-             "list below is left blank. A single id here = sequential on one GPU. To "
-             "use several GPUs, fill the GPUs field instead (do NOT put '0 1 2 3' here — "
-             "extra tokens here shift the positional args and corrupt angpix)."},
-            {"name": "angpix", "kind": "text", "flag": None,
-             "default": "1.57", "help": "Input pixel size (Å/px). 1.57 for this data."},
-            {"name": "ARETOMO_GPUS", "kind": "env", "flag": "ARETOMO_GPUS", "gpu_sep": " ",
-             "default": "0 1 2 3",
-             "help": "GPUs to spread tilt series across (space- or comma-separated). Each "
-             "series runs on ONE GPU; with N GPUs, N series align at once (~N× faster). "
-             "Blank = use the single 'gpu' field above (sequential)."},
-            {"name": "ARETOMO_JOBS_PER_GPU", "kind": "env_int", "flag": "ARETOMO_JOBS_PER_GPU",
-             "default": 1, "min": 1, "max": 4, "step": 1,
-             "help": "Concurrent AreTomo jobs PER GPU. 1 is safe; a 32 GB V100 can usually "
-             "fit 2 at bin 8. Total concurrency = (#GPUs) × this."},
-            {"name": "ARETOMO_ALIGNZ", "kind": "env", "flag": "ARETOMO_ALIGNZ",
-             "default": "670", "help": "Alignment Z (unbinned px) ≈ lamella thickness."},
-            {"name": "ARETOMO_VOLZ", "kind": "env", "flag": "ARETOMO_VOLZ",
-             "default": "3088", "help": "Output Z height; must exceed lamella thickness. "
-             "Set 0 for ALIGNMENT-ONLY (skips the slow tomogram, still writes the .xf you "
-             "import) — the fast way to align a whole dataset for ts_import / miss-alignment."},
-            {"name": "ARETOMO_OUTBIN", "kind": "env_int", "flag": "ARETOMO_OUTBIN",
-             "default": 8, "min": 1, "max": 16, "step": 1,
-             "help": "Output binning. 8 → 12.56 Å/px at 1.57 input."},
-            {"name": "ARETOMO_DARKTOL", "kind": "env", "flag": "ARETOMO_DARKTOL",
-             "default": "0.000001", "help": "Dark-frame tol; ~0 disables (pre-curated tilts)."},
-            {"name": "ARETOMO_TILTCOR", "kind": "env", "flag": "ARETOMO_TILTCOR",
-             "default": "0", "help": "Tilt-offset correction 0/1. Usually 0 for lamellae."},
-            {"name": "ARETOMO_FLIPVOLZ", "kind": "env", "flag": "ARETOMO_FLIPVOLZ",
-             "default": "1", "help": "Flip handedness for Warp 0/1. Usually 1."},
-            {"name": "ARETOMO_WBP", "kind": "env", "flag": "ARETOMO_WBP",
-             "default": "1", "help": "Weighted back projection 0/1."},
-            {"name": "ARETOMO_TILTAXIS", "kind": "env", "flag": "ARETOMO_TILTAXIS",
-             "default": "", "help": "Tilt-axis (deg). Blank = AreTomo searches."},
-            {"name": "ARETOMO_PATCH", "kind": "env", "flag": "ARETOMO_PATCH",
-             "default": "", "help": "Patch align e.g. '4 4'. Blank = skip patch tracking."},
-            {"name": "ARETOMO_ALIGN", "kind": "env", "flag": "ARETOMO_ALIGN",
-             "default": "1", "help": "1 = align+recon, 0 = reconstruct only."},
-            {"name": "ARETOMO_BIN", "kind": "env", "flag": "ARETOMO_BIN",
-             "default": "/ceph/groups/structbio/Programs/AreTomo2/AreTomo2",
-             "help": "AreTomo2 executable path."},
-            {"name": "ARETOMO_CUDA_LIB", "kind": "env", "flag": "ARETOMO_CUDA_LIB",
-             "default": "",
-             "help": "Optional. Dir holding libcufft.so.11 + the CUDA-12 runtime. Normally "
-             "BLANK — the wrapper uses the cuda module's libs (via a stub-free symlink "
-             "farm so the real driver is found). Set it only to override with your own "
-             "CUDA-12 runtime, e.g. /ceph/users/<you>/.conda/envs/cuda12rt/lib."},
-        ],
-        "docs": {
-            "what": "Marker-free tilt-series alignment (+optional recon). Writes "
-                    ".xf/.tlt per series under <output>/Imod/.",
-            "range": "ALIGNZ ≈ lamella thickness; OUTBIN 8 → 12.56 Å/px; patch 4×4–6×6.",
-            "effect": "Patch tracking improves local alignment but is slower. GPUs runs "
-                      "tilt series in parallel (one per GPU); '0 1 2 3' is ~4× faster than one.",
-            "pitfall": "Each run writes a NEW versioned folder (aretomo_output, "
-                       "-v2, …) with a PARAMETERS.txt audit. IMOD can't read Warp "
-                       "float16 MRC — export WARP_FORCE_MRC_FLOAT32=1 before 3dmod "
-                       "(brief gotcha §4.2).",
-        },
-        "status": lambda ps: ps.status_aretomo_xf(),
-    },
-    {
-        # miss-alignment TRAIN: train a model on THIS set (which must already hold a
-        # coarse AreTomo alignment) and refine it. Enforced order: AreTomo ->
-        # ts_import_alignments -> select -> THIS -> ts_ctf. On a fresh run the GUI
-        # auto-prepends the AreTomo import + select; on raw stacks it's blocked outright.
-        "group": "5. Alignment", "id": "miss_align",
-        "label": "miss-alignment (train)",
-        "base": "bash",
-        "requires_coarse_alignment": True,
-        "fixed_env": {"MA_MODE": "train"},
-        "params": [
-            {"name": "script", "kind": "text", "flag": None,
-             "default": _pkg_script("ml_missalignment_warp_auto.sh"),
-             "help": "miss-alignment wrapper script (shipped with the app)."},
-            {"name": "config", "kind": "text", "flag": None,
-             "default": "missalignment_config.yaml",
-             "help": "TRAIN YAML config (relative to root). If missing, the wrapper seeds "
-             "a training template and stops so you can review it, then re-run."},
-            {"name": "input_dir", "kind": "text", "flag": None,
-             "default": "warp_tiltseries",
-             "help": "Warp tilt-series dir with <series>.xml + tiltstack/<series>/"
-             "<series>.st (run ts_import + ts_stack first, same prereqs as AreTomo)."},
-            {"name": "MA_TRAINING_DEVICES", "kind": "env", "flag": "MA_TRAINING_DEVICES",
-             "default": "0", "help": "--training-devices. KEEP THIS A SINGLE GPU (e.g. "
-             "'0'). >1 makes torch spawn one trainer per GPU and they race to wipe the "
-             "shared pool dir → FileNotFoundError on a partition_*.pickle. Scale speed "
-             "with RECON devices + dataloaders instead."},
-            {"name": "MA_RECON_DEVICES", "kind": "env", "flag": "MA_RECON_DEVICES", "gpu_sep": ",",
-             "default": "0,0,0", "help": "--reconstruction-devices: this is where you add "
-             "GPUs for speed (recon feeds the pool and is the bottleneck). e.g. '0,1,2,3' "
-             "or repeat an id to stack workers on it ('0,0,0')."},
-            {"name": "MA_DATALOADERS", "kind": "env_int", "flag": "MA_DATALOADERS",
-             "default": 5, "min": 1, "max": 16, "step": 1,
-             "help": "--dataloaders-per-trainer. The recon pool is split into "
-             "(training_devices × this) partitions, each needing ≥ 2×batch_size; "
-             "if it errors, raise Pool size or lower this."},
-            {"name": "MA_POOL_SIZE", "kind": "env_int", "flag": "MA_POOL_SIZE",
-             "default": 2000, "min": 500, "max": 8000, "step": 100,
-             "help": "--pool-size: subtomogram reconstructions cached in the temp "
-             "pool. Must be ≥ 2×batch_size×training_devices×dataloaders (2000 keeps "
-             "4 GPU × 5 loaders × batch 32 valid). Type the exact number."},
-            {"name": "MA_START_ITER", "kind": "env_int", "flag": "MA_START_ITER",
-             "default": 0, "min": 0, "max": 20, "step": 1,
-             "help": "--start-at-iteration (resume from the HIGHEST existing iterN)."},
-            {"name": "MA_PREPARE_STACKS", "kind": "env", "flag": "MA_PREPARE_STACKS",
-             "default": "10.0", "help": "--prepare-stacks pixel size (Å/px) for the "
-             "reconstruction patches. Blank = skip stack preparation."},
-            {"name": "MA_CONDA_ENV", "kind": "env", "flag": "MA_CONDA_ENV",
-             "default": "miss-alignment",
-             "help": "conda env that has miss-alignment installed (its own CUDA 12.9 / "
-             "torch stack — NOT the warp env)."},
-        ],
-        "docs": {
-            "what": "Deep-learning REFINEMENT of an EXISTING alignment by TRAINING a model "
-                    "on this set (warpem/miss-alignment). Does NOT align raw stacks — the "
-                    "docs state 'miss-alignment starts from an initially coarse aligned "
-                    "dataset', so coarse-align FIRST (AreTomo → ts_import_alignments).",
-            "range": "training/recon devices, prepare-stacks Å/px, start-iteration.",
-            "effect": "Trains a 3D CNN to score reconstruction quality, then gradient-"
-                      "optimises the shifts against it, writing the refined alignment back "
-                      "into the .xml. The trained iterN/model.ckpt can then be REUSED via "
-                      "the 'miss-alignment (infer)' step on a larger set.",
-            "pitfall": "MUST have a coarse prior alignment first — on RAW stacks it yields "
-                       "a featureless tomogram (the GUI blocks this). Single TRAINING GPU "
-                       "only. First run seeds a config and STOPS for review. Re-train if the "
-                       "prior alignment changed.",
-        },
-        "status": None,
-    },
-    {
-        # miss-alignment INFER: REUSE a finished model to align a new/larger set WITHOUT
-        # training. No coarse-align auto-chain (you coarse-align the big set yourself and
-        # deselect the unaligned); needs MA_MODEL_RUN_DIR = the training run's iterN dir.
-        "group": "5. Alignment", "id": "miss_align_infer",
-        "label": "miss-alignment (infer — reuse model)",
-        "base": "bash",
-        "fixed_env": {"MA_MODE": "infer"},
-        "params": [
-            {"name": "script", "kind": "text", "flag": None,
-             "default": _pkg_script("ml_missalignment_warp_auto.sh"),
-             "help": "miss-alignment wrapper script (shipped with the app)."},
-            {"name": "config", "kind": "text", "flag": None,
-             "default": "missalignment_infer_config.yaml",
-             "help": "INFER YAML config (relative to root). If missing, the wrapper seeds "
-             "an inference template (data_directory + model_run_directory) and stops for "
-             "review. iteration_settings MUST match the training run."},
-            {"name": "input_dir", "kind": "text", "flag": None,
-             "default": "warp_tiltseries",
-             "help": "This dataset's warp_tiltseries — already coarse-aligned + imported, "
-             "with the unaligned series deselected."},
-            {"name": "MA_MODEL_RUN_DIR", "kind": "env", "flag": "MA_MODEL_RUN_DIR",
-             "default": "", "help": "REQUIRED: the finished TRAINING run dir holding "
-             "iter1/model.ckpt … iterN/model.ckpt (e.g. <selected>/warp_tiltseries)."},
-            {"name": "MA_INFER_DEVICES", "kind": "env", "flag": "MA_INFER_DEVICES", "gpu_sep": ",",
-             "default": "0,1,2,3", "help": "GPUs for alignment (CUDA_VISIBLE_DEVICES). "
-             "Inference has no training race, so use all the idle cards (check util%)."},
-            {"name": "MA_START_ITER", "kind": "env_int", "flag": "MA_START_ITER",
-             "default": 0, "min": 0, "max": 20, "step": 1,
-             "help": "--start-at-iteration (resume inference from iteration N)."},
-            {"name": "MA_PREPARE_STACKS", "kind": "env", "flag": "MA_PREPARE_STACKS",
-             "default": "10.0", "help": "--prepare-stacks pixel size (Å/px). MUST equal the "
-             "resolution you TRAINED at (e.g. 12.56) — the model only works at its scale."},
-            {"name": "MA_CONDA_ENV", "kind": "env", "flag": "MA_CONDA_ENV",
-             "default": "miss-alignment",
-             "help": "conda env with miss-alignment installed."},
-        ],
-        "docs": {
-            "what": "Reuse a model trained by 'miss-alignment (train)' to align THIS "
-                    "(usually larger) dataset with NO retraining — runs 'miss-alignment "
-                    "infer', loading iterN/model.ckpt for each iteration.",
-            "range": "model_run_directory, infer devices, prepare-stacks Å/px.",
-            "effect": "Applies the trained models to refine the coarse alignment already "
-                      "in this set's .xml. Much faster than training. Alignment uses all "
-                      "visible GPUs (no training-worker race).",
-            "pitfall": "This set must ALREADY be coarse-aligned (AreTomo → import → "
-                       "deselect unaligned) — infer refines, it does not align from scratch. "
-                       "prepare-stacks and the config's iteration_settings MUST match the "
-                       "training run, and length ≤ number of iterN/model.ckpt.",
-        },
-        "status": None,
-    },
-    {
-        "group": "5. Alignment", "id": "ts_import_alignments",
-        "label": "ts_import_alignments",
-        "base": "WarpTools ts_import_alignments",
-        "params": [
-            {"name": "settings", "kind": "text", "flag": "--settings",
-             "default": "warp_tiltseries.settings", "help": "ts .settings file."},
-            {"name": "alignments", "kind": "text", "flag": "--alignments",
-             "default": "aretomo_output/Imod/", "help": "AreTomo Imod/ folder."},
-            {"name": "alignment_angpix", "kind": "text", "flag": "--alignment_angpix",
-             "default": "1.57", "help": "Pixel size AreTomo aligned at (1.57)."},
-        ],
-        "docs": {
-            "what": "Imports AreTomo .xf/.tlt alignments back into Warp.",
-            "range": "n/a",
-            "effect": "ts_ctf / ts_reconstruct use these alignments.",
-            "pitfall": "alignment_angpix must match the AreTomo INPUT pixel size, "
-                       "not the binned output (1.57 here).",
-        },
-        "status": lambda ps: ps.status_alignments_imported(),
-    },
-    {
-        "group": "5. Alignment", "id": "sync_selection",
-        "label": "sync selection ↔ alignments",
-        "base": "WarpTools change_selection",
-        "sync_helper": True,
-        "params": [
-            {"name": "settings", "kind": "text", "flag": "--settings",
-             "default": "warp_tiltseries.settings", "help": "ts .settings file."},
-            {"name": "mode", "kind": "choice", "flag": None,
-             "choices": [
-                 ("Deselect", "--deselect"),
-                 ("Select (re-enable)", "--select"),
-                 ("Null (reset to unset)", "--null"),
-                 ("Invert", "--invert"),
-             ],
-             "default": "--deselect",
-             "help": "WarpTools accepts EXACTLY ONE. Deselect = drop the listed series; "
-                     "Select = re-enable them. Without --input_data it applies to ALL."},
-            {"name": "input_data", "kind": "text", "flag": "--input_data",
-             "default": "", "help": "One tomostar to (de)select. Use the button to "
-             "fill a chained command for ALL unaligned tomostars. Blank = all series."},
-        ],
-        "docs": {
-            "what": "Deselects tilt series with no AreTomo alignment so "
-                    "ts_reconstruct won't crash trying to reconstruct them.",
-            "range": "n/a",
-            "effect": "Reconstruct only operates on selected, aligned series.",
-            "pitfall": "Reversible — re-run with mode 'Select' to re-enable. WarpTools "
-                       "errors ('Choose exactly 1 of the options') if no mode is given. "
-                       "The dot is green only when every tomostar is aligned.",
-        },
-        "status": lambda ps: ps.status_selection_sync(),
-    },
-
-    # ---------------- 6. CTF ----------------
-    {
-        "group": "6. CTF", "id": "ts_defocus_hand", "label": "ts_defocus_hand",
-        "base": "WarpTools ts_defocus_hand",
-        "params": [
-            {"name": "settings", "kind": "text", "flag": "--settings",
-             "default": "warp_tiltseries.settings", "help": "ts .settings file."},
-            {"name": "mode", "kind": "choice", "flag": None,
-             "choices": [
-                 ("Check handedness only (no change)", "--check"),
-                 ("Set: flip", "--set_flip"),
-                 ("Set: no-flip", "--set_noflip"),
-                 ("Set: auto (apply the checked result)", "--set_auto"),
-                 ("Set: switch (toggle current)", "--set_switch"),
-             ],
-             "default": "--check",
-             "help": "WarpTools accepts EXACTLY ONE mode. Run 'Check' first; if it "
-                     "reports a negative average correlation, switch to 'Set: flip' "
-                     "(or 'Set: auto') and Run again."},
-        ],
-        "validate": lambda v: (
-            "⚠ Run 'Check handedness only' first; pick a Set option only after it "
-            "reports a negative correlation."
-            if v.get("mode") not in (None, "--check") else ""),
-        "docs": {
-            "what": "Checks (and optionally flips) defocus handedness. Exactly one "
-                    "mode runs per invocation.",
-            "range": "n/a",
-            "effect": "Wrong handedness inverts the CTF and ruins refinement.",
-            "pitfall": "Check first; only set flip/auto on a confirmed negative "
-                       "correlation. Passing --check together with a --set_ option "
-                       "errors ('Choose exactly 1 of the options').",
-        },
-        "status": None,  # no distinct file output
-    },
-    {
-        "group": "6. CTF", "id": "ts_ctf", "label": "ts_ctf",
-        "base": "WarpTools ts_ctf",
-        "group_scope": "ts",
-        "params": [
-            {"name": "settings", "kind": "text", "flag": "--settings",
-             "default": "warp_tiltseries.settings", "help": "ts .settings file."},
-            {"name": "range_high", "kind": "text", "flag": "--range_high",
-             "default": "7", "help": "CTF fit max resolution (Å)."},
-            {"name": "defocus_max", "kind": "text", "flag": "--defocus_max",
-             "default": "8", "help": "Max defocus to search (µm)."},
-            {"name": "device_list", "kind": "text", "flag": "--device_list", "gpu_sep": " ",
-             "default": "0", "help": "GPU id(s)."},
-            {"name": "perdevice", "kind": "slider_int", "flag": "--perdevice",
-             "default": 2, "min": 1, "max": 4, "step": 1, "help": "Workers per GPU."},
-        ],
-        "docs": {
-            "what": "Per-tilt CTF refinement across each series.",
-            "range": "range_high ~7 Å; defocus_max ~8 µm.",
-            "effect": "Better per-tilt CTF improves reconstruction + averaging.",
-            "pitfall": "Run ts_defocus_hand first to fix handedness.",
-        },
-        "status": lambda ps: ps.status_ts_ctf(),
-    },
-
-    # ---------------- 7. Reconstruct ----------------
-    {
-        # ---------- REFERENCE STAGE / GPU GUARD ----------
-        "group": "7. Reconstruct", "id": "ts_reconstruct", "label": "ts_reconstruct",
-        "base": "WarpTools ts_reconstruct",
-        "group_scope": "ts",
-        # Warp writes float16 MRC by default; force float32 so IMOD/3dmod/Dynamo can
-        # read the tomograms (and ts_reconstruct itself needs it set in the env).
-        "env_export": {"WARP_FORCE_MRC_FLOAT32": "1"},
-        "params": [
-            {"name": "settings", "kind": "text", "flag": "--settings",
-             "default": "warp_tiltseries.settings", "help": "ts .settings file."},
-            {"name": "angpix", "kind": "text", "flag": "--angpix",
-             "default": "10", "help": "OUTPUT tomogram pixel size (Å/px). 10 = a normal "
-             "viewable/pickable tomogram. DO NOT use native (1.57) for full tomograms: "
-             "the volume scales as (10/1.57)³ ≈ 260×, so each is tens of GB and ~40 min. "
-             "Particles get reconstructed at fine res later by ts_export_particles."},
-            {"name": "device_list", "kind": "text", "flag": "--device_list", "gpu_sep": " ",
-             "default": "0", "help": "GPU id(s), e.g. 0 or '0 1'. Pick GPUs whose "
-             "nvidia-smi GPU-Util is ~0% — low memory-used alone does NOT mean free."},
-            {"name": "perdevice", "kind": "slider_int", "flag": "--perdevice",
-             "default": 1, "min": 1, "max": 4, "step": 1,
-             "help": "Workers per GPU. KEEP AT 1 when --deconv is on (V100 cuFFT crash)."},
-            {"name": "deconv", "kind": "check", "flag": "--deconv",
-             "default": False, "help": "Deconvolve for visual contrast (not for STA)."},
-            {"name": "dont_invert", "kind": "check", "flag": "--dont_invert",
-             "default": True, "help": "Skip contrast inversion (dataset-specific)."},
-        ],
-        "validate": lambda v: (
-            "⚠ perdevice > 1 with --deconv crashes on V100 (SIGABRT exit 134). "
-            "Set perdevice 1 — or, if EML45 is NOT V100, re-test before overriding."
-            if v.get("perdevice", 1) > 1 and v.get("deconv") else ""),
-        "docs": {
-            "what": "Back-projects aligned, CTF-corrected tilts into 3D tomograms.",
-            "range": "angpix ~10 for viewable tomograms; perdevice 1-2; deconv off for averaging.",
-            "effect": "deconv boosts low-freq contrast; dont_invert flips densities.",
-            "pitfall": "angpix native (1.57 / blank) makes tens-of-GB tomograms (~260× a "
-                       "10 Å one) — it looks 'stuck at 0/15' but is just grinding; use ~10. "
-                       "perdevice 2 + deconv = SIGABRT on V100 (cuFFT collision). Float16 MRC "
-                       "output needs WARP_FORCE_MRC_FLOAT32=1 to open in IMOD/3dmod.",
-        },
-        "status": lambda ps: ps.status_warp_tomograms(),
-    },
-
-    # ---------------- 8. Pick ----------------
-    {
-        "group": "8. Pick", "id": "ts_template_match", "label": "ts_template_match",
-        "base": "WarpTools ts_template_match",
-        "group_scope": "ts",
-        "params": [
-            {"name": "settings", "kind": "text", "flag": "--settings",
-             "default": "warp_tiltseries.settings", "help": "ts .settings file."},
-            {"name": "tomo_angpix", "kind": "text", "flag": "--tomo_angpix",
-             "default": "10", "help": "Matching pixel size (Å). MUST equal a ts_reconstruct "
-             "--angpix you have ALREADY run — matching reuses that full tomogram "
-             "(warp_tiltseries/reconstruction/<pos>_<angpix>Apx.mrc). Mismatch → "
-             "'A reconstruction at the desired resolution was not found'. 8-12 typical."},
-            {"name": "template_emdb", "kind": "text", "flag": "--template_emdb",
-             "default": "", "help": "EMDB code to fetch + use as the template, e.g. 70905. "
-             "Set EITHER this OR template_path (not both)."},
-            {"name": "template_path", "kind": "text", "flag": "--template_path",
-             "default": "", "help": "Path to a local template .mrc. Set EITHER this OR "
-             "template_emdb (not both)."},
-            {"name": "override_suffix", "kind": "text", "flag": "--override_suffix",
-             "default": "", "help": "Overrides the STAR suffix (normally derived from the "
-             "template name) so this pick set gets its OWN name: files become "
-             "warp_tiltseries/matching/<pos>_<tomo_angpix>Apx<suffix>.star. INCLUDE A LEADING "
-             "UNDERSCORE if you want one (e.g. '_run2'; without it the suffix abuts 'Apx'). "
-             "Use a different suffix per run to keep parallel pick sets side by side — "
-             "threshold_picks / export then pick a set via --in_suffix (this is how you fork "
-             "picking). Blank = default template-derived name."},
-            {"name": "subdivisions", "kind": "slider_int", "flag": "--subdivisions",
-             "default": 3, "min": 1, "max": 6, "step": 1,
-             "help": "Angular subdivisions of the search (finer = more orientations, slower)."},
-            {"name": "template_diameter", "kind": "text", "flag": "--template_diameter",
-             "default": "", "help": "Particle diameter (Å)."},
-            {"name": "symmetry", "kind": "text", "flag": "--symmetry",
-             "default": "C1", "help": "Point group, e.g. O, D2, C1."},
-            {"name": "whiten", "kind": "check", "flag": "--whiten",
-             "default": True, "help": "Spectral whitening; helps with good alignments."},
-            {"name": "optimize_poses", "kind": "check", "flag": "--optimize_poses",
-             "default": False, "help": "Locally refine each hit's orientation/position after "
-             "the coarse search (better picks, a bit slower). ON in the reference workflow."},
-            {"name": "check_hand", "kind": "slider_int", "flag": "--check_hand",
-             "default": 2, "min": 0, "max": 2, "step": 1,
-             "help": "2 = verify geometry/handedness during matching."},
-            {"name": "npeaks", "kind": "slider_int", "flag": "--npeaks",
-             "default": 2000, "min": 100, "max": 50000, "step": 500,
-             "help": "Max peaks SAVED per tilt series. This is a HARD CAP — if a series "
-             "actually has more particles you'll silently keep only the top-scoring 2000. "
-             "For crowded samples raise it (you can tell you're capped when every series "
-             "returns exactly this many). Costs disk, not match time."},
-            {"name": "peak_distance", "kind": "text", "flag": "--peak_distance",
-             "default": "", "help": "Minimum spacing between peaks in Å. Blank = the template "
-             "diameter. Lower it (e.g. 30) for tightly-packed particles so neighbours aren't "
-             "suppressed; raise it to avoid double-picking one particle."},
-            {"name": "max_missing_tilts", "kind": "slider_int", "flag": "--max_missing_tilts",
-             "default": 2, "min": -1, "max": 20, "step": 1,
-             "help": "Drop positions not covered by at least this many tilts. -1 disables "
-             "culling (keep everything, e.g. thin/edge regions); default 2."},
-            {"name": "subvolume_size", "kind": "slider_int", "flag": "--subvolume_size",
-             "default": 192, "min": 48, "max": 512, "step": 16,
-             "help": "Local matching TILE size, in TOMOGRAM pixels (at tomo_angpix, NOT raw "
-             "pixels). Just needs to comfortably exceed the template — 192 does so hugely. "
-             "It is NOT the particle box (that's export --box). Reduce only if you hit GPU "
-             "OOM or want speed; keep it even (FFT-friendly)."},
-            {"name": "device_list", "kind": "text", "flag": "--device_list", "gpu_sep": " ",
-             "default": "", "help": "GPU id(s), space-separated e.g. '2 3'. BLANK = ALL "
-             "GPUs (Warp's default — it WILL grab 0/1). Set this to the idle cards (check "
-             "nvidia-smi util%) to leave others' jobs alone. Or prefix CUDA_VISIBLE_DEVICES=2,3."},
-            {"name": "perdevice", "kind": "slider_int", "flag": "--perdevice",
-             "default": 1, "min": 1, "max": 4, "step": 1,
-             "help": "Worker processes per GPU (raise only on big-memory cards)."},
-        ],
-        "validate": lambda v: (
-            "⚠ Set EXACTLY ONE of template_emdb / template_path — matching needs a template."
-            if bool(str(v.get("template_emdb", "")).strip())
-            == bool(str(v.get("template_path", "")).strip())
-            else "⚠ check_hand does NOT work with override_suffix: Warp reads the handedness "
-            "test back under the DEFAULT template name and dies ('Could not find "
-            "…_emd_XXXXX.star', all items fail). Set check_hand 0 for suffixed/forked runs — "
-            "determine handedness ONCE without a suffix, then reuse check_hand 0."
-            if str(v.get("override_suffix", "")).strip() and int(v.get("check_hand") or 0) > 0
-            else ""),
-        "docs": {
-            "what": "CTF-aware template matching to locate particles "
-                    "(apoferritin example values — adapt per target).",
-            "range": "tomo_angpix 8-12; subdivisions 3-4; check_hand 2 (0 with a suffix).",
-            "effect": "Lower tomo_angpix + higher subdivisions = finer, MUCH slower. With "
-                      "--optimize_poses, coarser subdivisions (3-4) suffice — local refinement "
-                      "recovers the precision.",
-            "pitfall": "tomo_angpix MUST match a ts_reconstruct --angpix you already ran "
-                       "(matching reuses that full tomogram) — else 'A reconstruction at the "
-                       "desired resolution was not found' and every series fails. check_hand>0 "
-                       "is INCOMPATIBLE with override_suffix (handedness readback uses the "
-                       "default template name → 'Could not find …_emd_XXXXX.star'): set "
-                       "check_hand 0 for suffixed runs. Defaults to ALL GPUs — set --device_list "
-                       "(e.g. '2 3') to avoid disturbing others on 0/1. Scores are "
-                       "background-normalised, so a threshold is comparable across tomograms.",
-        },
-        "status": lambda ps: ps.status_template_matches(),
-    },
-    {
-        "group": "8. Pick", "id": "threshold_picks", "label": "threshold_picks",
-        "base": "WarpTools threshold_picks",
-        "params": [
-            {"name": "settings", "kind": "text", "flag": "--settings",
-             "default": "warp_tiltseries.settings", "help": "ts .settings file."},
-            {"name": "in_suffix", "kind": "text", "flag": "--in_suffix",
-             "default": "", "help": "Suffix of the template-match star files to threshold."},
-            {"name": "out_suffix", "kind": "text", "flag": "--out_suffix",
-             "default": "clean", "help": "Suffix for thresholded output star files."},
-            {"name": "minimum", "kind": "slider_int", "flag": "--minimum",
-             "default": 3, "min": 0, "max": 10, "step": 1,
-             "help": "Min normalised score (≈ σ above background). 3 is a good start."},
-        ],
-        "docs": {
-            "what": "Keeps picks above a normalised score threshold; writes "
-                    "*<out_suffix>.star.",
-            "range": "minimum ~3 (σ above background).",
-            "effect": "Higher minimum = fewer, cleaner picks.",
-            "pitfall": "Scores compare across tomograms thanks to bg normalisation, "
-                       "so one minimum works project-wide.",
-        },
-        "status": lambda ps: ps.status_thresholded(),
-    },
-
-    # ---------------- 9. Export ----------------
-    {
-        "group": "9. Export", "id": "ts_export_particles",
-        "label": "ts_export_particles",
-        "base": "WarpTools ts_export_particles",
-        "group_scope": "ts",
-        "params": [
-            {"name": "settings", "kind": "text", "flag": "--settings",
-             "default": "warp_tiltseries.settings", "help": "ts .settings file."},
-            {"name": "input_directory", "kind": "text", "flag": "--input_directory",
-             "default": "warp_tiltseries/matching",
-             "help": "Where the thresholded pick stars live."},
-            {"name": "input_pattern", "kind": "text", "flag": "--input_pattern",
-             "default": "*clean.star", "help": "Glob for thresholded pick star files."},
-            {"name": "output_star", "kind": "text", "flag": "--output_star",
-             "default": "relion4/{jobid}/matching.star",
-             "help": "Output star path. Put it INSIDE the RELION project dir "
-             "(output_processing) — RELION must later be launched from that dir. "
-             "{jobid} resolves to this job's id so runs never collide."},
-            {"name": "output_processing", "kind": "text", "flag": "--output_processing",
-             "default": "relion4/{jobid}",
-             "help": "RELION project/export dir. The subtomo image paths in the star are "
-             "written RELATIVE to this, so you MUST launch RELION from here (the recurring "
-             "'file does not exist' bug is launching from the wrong dir). Default "
-             "relion4/{jobid} gives each export its own dir; Build-downstream from a "
-             "pick-set card instead names it after the pick set (relion4/<tag>)."},
-            {"name": "output_angpix", "kind": "text", "flag": "--output_angpix",
-             "default": "4", "help": "Export pixel size (Å). Choose so Nyquist sits just "
-             "below feature resolution."},
-            {"name": "box", "kind": "slider_int", "flag": "--box",
-             "default": 64, "min": 32, "max": 256, "step": 8, "help": "Box size (px)."},
-            {"name": "diameter", "kind": "text", "flag": "--diameter",
-             "default": "", "help": "Particle diameter (Å)."},
-            {"name": "relion_format", "kind": "choice", "flag": None,
-             "choices": [
-                 ("3D subtomograms (RELION 4)", "--3d"),
-                 ("2D image series (RELION 5)", "--2d"),
-             ],
-             "default": "--3d",
-             "help": "RELION 4 uses 3D subtomos (--3d). RELION 5 --tomo uses the 2D "
-             "image series (--2d). WarpTools needs exactly one of these — pick to match "
-             "the RELION you'll hand off to."},
-            {"name": "normalized_coords", "kind": "check", "flag": "--normalized_coords",
-             "default": True, "help": "Coords normalised to tomogram dimensions."},
-            {"name": "relative_output_paths", "kind": "check",
-             "flag": "--relative_output_paths", "default": True,
-             "help": "Write relative paths into the star (portable projects). Keep ON — "
-             "the RELION-launch-from-output_processing rule depends on it."},
-        ],
-        "validate": lambda v: (
-            "⚠ output_star should live INSIDE output_processing so RELION resolves the "
-            "subtomo paths (launch RELION from output_processing)."
-            if v.get("output_processing") and not str(v.get("output_star", "")).startswith(
-                str(v.get("output_processing", "")).rstrip("/") + "/") else ""),
-        "docs": {
-            "what": "Extracts CTF-corrected particles into a RELION project dir — a "
-                    "particles star (+ optimisation_set.star for RELION 5).",
-            "range": "box 64-128; output_angpix 3-5 for most targets.",
-            "effect": "3D subtomos (--3d) = RELION 4; --2d = RELION 5 --tomo. Paths are "
-                      "relative to output_processing — that dir IS the RELION project root.",
-            "pitfall": "LAUNCH RELION FROM output_processing, or every subtomo path is "
-                       "wrong ('file does not exist'). RELION 4 does NOT auto-resize the "
-                       "reference — pre-scale it (see 'RELION 4: Class3D'). Then continue "
-                       "in the 'RELION 4' steps below, or hand off to RELION's own GUI.",
-        },
-        "status": lambda ps: ps.status_exported(),
-    },
-
-    # ---------------- 10. RELION 4 handoff (subtomo averaging) ----------------
-    {
-        # Bridge between ts_export_particles and the Class3D handoff: convert the Warp
-        # export star to RELION 4 format (relion_convert_star), rewriting the relative
-        # 'subtomo/' particle paths to absolute so RELION finds every subtomogram, and
-        # optionally build a de-novo initial reference from a random particle subset
-        # (relion_reconstruct). Driven by ml_relion4_convert_star_warp_auto.sh.
-        "group": "10. RELION 4", "id": "relion4_convert",
-        "label": "RELION 4: convert STAR + init ref",
-        "base": "bash",
-        "params": [
-            {"name": "script", "kind": "text", "flag": None,
-             "default": _pkg_script("ml_relion4_convert_star_warp_auto.sh"),
-             "help": "STAR conversion + initial-reference wrapper (shipped with the app)."},
-            {"name": "project_dir", "kind": "text", "flag": None,
-             "default": "relion4/warp",
-             "help": "The RELION project dir = ts_export_particles' output_processing. "
-             "The script runs relion FROM here (the launch-root invariant)."},
-            {"name": "starfile", "kind": "text", "flag": None,
-             "default": "matching.star",
-             "help": "Warp export star, RELATIVE to project_dir (e.g. matching.star)."},
-            {"name": "RELION_MODULE", "kind": "env", "flag": "RELION_MODULE",
-             "default": "relion/4.0.1", "help": "module load name for RELION 4 on your cluster."},
-            {"name": "PARTICLEDIR", "kind": "env", "flag": "PARTICLEDIR",
-             "default": "", "help": "Absolute path to the exported subtomo/ dir (the "
-             "'subtomo/' prefix in the star is rewritten to this). Blank = "
-             "<project_dir>/subtomo/. A trailing slash is enforced."},
-            {"name": "PATH_MATCH", "kind": "env", "flag": "PATH_MATCH",
-             "default": "subtomo/", "help": "Path prefix in the Warp star to replace with "
-             "PARTICLEDIR. Change only if export wrote a different prefix."},
-            {"name": "CS", "kind": "env", "flag": "CS",
-             "default": "2.7", "help": "Spherical aberration (mm) for relion_convert_star."},
-            {"name": "Q0", "kind": "env", "flag": "Q0",
-             "default": "0.07", "help": "Amplitude contrast for relion_convert_star."},
-            {"name": "NREF", "kind": "env_int", "flag": "NREF",
-             "default": 1000, "min": 100, "max": 5000, "step": 100,
-             "help": "Random particles used to reconstruct the initial reference."},
-            {"name": "MAKE_REF", "kind": "env", "flag": "MAKE_REF",
-             "default": "1", "help": "1 = also build random_subset_ref.mrc (relion_reconstruct); "
-             "0 = only convert the star."},
-            {"name": "execute", "kind": "check", "flag": "--execute",
-             "default": False, "help": "OFF = dry run (prints the plan + relion commands, "
-             "runs nothing). Turn ON to actually convert + reconstruct."},
-        ],
-        "docs": {
-            "what": "Converts the Warp ts_export_particles star to RELION 4 format and builds "
-                    "a de-novo initial reference. Rewrites the relative 'subtomo/' particle "
-                    "paths to absolute (so RELION finds every subtomogram), runs "
-                    "relion_convert_star, then samples NREF random particles and "
-                    "relion_reconstructs random_subset_ref.mrc.",
-            "range": "NREF 500-2000; Cs 2.7 mm, Q0 0.07 (300 kV cryo defaults).",
-            "effect": "Writes <star>_conv.star (the RELION 4 particles) and, unless MAKE_REF=0, "
-                      "random_subset_ref.mrc — a ready-to-use reference for Class3D (no external "
-                      "EMDB map needed). Defaults to a DRY RUN — tick EXECUTE to run.",
-            "pitfall": "Runs FROM project_dir (paths are relative to it). PATH_MATCH must match "
-                       "how export wrote the paths ('subtomo/' by default) or the rewrite is a "
-                       "no-op and RELION can't find the particles. The header split is "
-                       "auto-detected from the star's '_rln' labels (replaces the old hardcoded "
-                       "head -n 33 / tail -n +35).",
-        },
-        "status": None,
-    },
-    {
-        # Extends the pipeline past export into a RELION 4 Class3D handoff, driven by
-        # ml_relion4_handoff_warp_auto.sh. Encodes the invariants that repeatedly bite:
-        # launch-from-export-dir, v4 reference pre-scale, clean project dir, nGPU+1 MPI.
-        "group": "10. RELION 4", "id": "relion4_class3d",
-        "label": "RELION 4: Class3D handoff",
-        "base": "bash",
-        "params": [
-            {"name": "script", "kind": "text", "flag": None,
-             "default": _pkg_script("ml_relion4_handoff_warp_auto.sh"),
-             "help": "RELION 4 handoff wrapper (shipped with the app)."},
-            {"name": "project_dir", "kind": "text", "flag": None,
-             "default": "relion4/warp",
-             "help": "The RELION project dir = ts_export_particles' output_processing. "
-             "The script runs relion FROM here (the launch-root invariant)."},
-            {"name": "particles", "kind": "text", "flag": None,
-             "default": "matching.star",
-             "help": "Particles star, RELATIVE to project_dir (e.g. matching.star)."},
-            {"name": "RELION_MODULE", "kind": "env", "flag": "RELION_MODULE",
-             "default": "relion/4.0.1", "help": "module load name for RELION 4 on your cluster."},
-            {"name": "REF_MAP", "kind": "env", "flag": "REF_MAP",
-             "default": "", "help": "Reference map (.mrc) — e.g. the EMDB map you template-"
-             "matched with. RELION 4 does NOT auto-resize; the script rescales it to match."},
-            {"name": "REF_ANGPIX", "kind": "env", "flag": "REF_ANGPIX",
-             "default": "", "help": "Pixel size (Å) of REF_MAP (from its header/EMDB page)."},
-            {"name": "OUTPUT_ANGPIX", "kind": "env", "flag": "OUTPUT_ANGPIX",
-             "default": "4", "help": "Must equal the export output_angpix (particles' Å/px)."},
-            {"name": "BOX", "kind": "env_int", "flag": "BOX",
-             "default": 64, "min": 32, "max": 256, "step": 8,
-             "help": "Must equal the export box size (px)."},
-            {"name": "DIAMETER", "kind": "env", "flag": "DIAMETER",
-             "default": "", "help": "Particle diameter (Å) for the mask."},
-            {"name": "SYMMETRY", "kind": "env", "flag": "SYMMETRY",
-             "default": "C1", "help": "Classify in C1; symmetrise only at Refine3D."},
-            {"name": "NCLASSES", "kind": "env_int", "flag": "NCLASSES",
-             "default": 4, "min": 1, "max": 12, "step": 1, "help": "Number of 3D classes (K)."},
-            {"name": "GPUS", "kind": "env", "flag": "GPUS", "gpu_sep": ",",
-             "default": "0,1,2,3", "help": "GPU ids for RELION (idle ones — check util%). "
-             "Any separator; the script converts to RELION's colon form (0:1:2:3) so each "
-             "MPI follower gets its OWN GPU — a space/comma list makes RELION pile all "
-             "followers onto GPU 0. MPI is set to (#GPUs + 1) automatically."},
-            {"name": "execute", "kind": "check", "flag": "--execute",
-             "default": False, "help": "OFF = dry run (prints the plan + relion command, "
-             "runs nothing). Turn ON to actually submit Class3D."},
-        ],
-        "docs": {
-            "what": "Hands the exported subtomograms to RELION 4 for 3D classification — "
-                    "asserts the export is complete, checks the launch-root path invariant, "
-                    "pre-scales the reference, cleans the project dir, and submits Class3D.",
-            "range": "NCLASSES 3-6; ini-lowpass 45 Å; MPI = #GPUs + 1.",
-            "effect": "Runs relion_refine_mpi from project_dir. Defaults to a DRY RUN — tick "
-                      "EXECUTE to launch. RELION 4 is the GPU-native path on this VM class "
-                      "(RELION 5's container CUDA can outrun the host driver → GPU error 35).",
-            "pitfall": "REF must be pre-scaled to OUTPUT_ANGPIX + BOX (the script does it via "
-                       "relion_image_handler). OUTPUT_ANGPIX/BOX MUST match the export. Never "
-                       "launch inside another RELION version's project (the script parks stale "
-                       "pipeline files first).",
-        },
-        "status": None,
-    },
-]
-
-def expand_tilt_ranges(text):
-    """Expand IMOD tilt-number ranges to explicit comma-separated values, since
-    remake_mdocs only handles individual numbers:
-        '1,4-12,48' -> '1,4,5,6,7,8,9,10,11,12,48'
-    Unparseable tokens are dropped; order is preserved, duplicates removed."""
-    out, seen = [], set()
-    for tok in str(text).replace(" ", "").split(","):
-        if not tok:
-            continue
-        if "-" in tok:
-            try:
-                a, b = (int(x) for x in tok.split("-", 1))
-            except ValueError:
-                continue
-            rng = range(a, b + 1) if a <= b else range(a, b - 1, -1)
-        else:
-            try:
-                rng = [int(tok)]
-            except ValueError:
-                continue
-        for n in rng:
-            if n not in seen:
-                seen.add(n)
-                out.append(n)
-    return ",".join(str(n) for n in out)
-
-
-def _h(s):
-    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def render_docs_html(doc):
-    """Rich left-panel HTML for a stage doc dict (from tomogration_docs.json):
-    title → what → why → parameter table → pitfalls (red) → good-output QC →
-    refs as clickable links."""
-    h = [f"<h2 style='color:#eaeaea;margin:0 0 8px 0;'>{_h(doc.get('title', ''))}</h2>"]
-    for key, head, col in (("what", "WHAT", "#9ec5ff"), ("why", "WHY", "#9ec5ff")):
-        if doc.get(key):
-            h.append(f"<p style='margin:6px 0;'><b style='color:{col};'>{head}</b><br>"
-                     f"{_h(doc[key])}</p>")
-    params = doc.get("params") or []
-    if params:
-        h.append("<p style='margin:8px 0 2px;'><b style='color:#9ec5ff;'>PARAMETERS</b></p>")
-        h.append("<table cellspacing='0' cellpadding='3' width='100%' "
-                 "style='border-collapse:collapse;font-size:11px;'>")
-        h.append("<tr style='color:#9a9a9a;'><th align='left'>name</th>"
-                 "<th align='left'>flag</th><th align='left'>default</th>"
-                 "<th align='left'>range</th><th align='left'>effect</th></tr>")
-        for i, p in enumerate(params):
-            bg = "#202020" if i % 2 else "#262626"
-            h.append(
-                f"<tr style='background:{bg};'>"
-                f"<td valign='top'><code style='color:#cfe;'>{_h(p.get('name', ''))}</code></td>"
-                f"<td valign='top'><code style='color:#cc9;'>{_h(p.get('flag', ''))}</code></td>"
-                f"<td valign='top'>{_h(p.get('default', ''))}</td>"
-                f"<td valign='top' style='color:#9a9a9a;'>{_h(p.get('range', ''))}</td>"
-                f"<td valign='top'>{_h(p.get('effect', ''))}</td></tr>")
-        h.append("</table>")
-    if doc.get("pitfalls"):
-        h.append(f"<p style='margin:8px 0;'><b style='color:#e24b4a;'>PITFALLS</b><br>"
-                 f"<span style='color:#f0a0a0;'>{_h(doc['pitfalls'])}</span></p>")
-    if doc.get("qc"):
-        h.append(f"<p style='margin:8px 0;'><b style='color:#27ae60;'>GOOD OUTPUT "
-                 f"LOOKS LIKE</b><br><span style='color:#b8e0c0;'>{_h(doc['qc'])}"
-                 f"</span></p>")
-    refs = doc.get("refs") or []
-    if refs:
-        h.append("<p style='margin:8px 0 2px;'><b style='color:#9ec5ff;'>REFS</b></p>"
-                 "<ul style='margin:2px 0 2px 16px;padding:0;'>")
-        for r in refs:
-            h.append(f"<li><a href='{_h(r)}' style='color:#7fb4ff;'>{_h(r)}</a></li>")
-        h.append("</ul>")
-    return "".join(h)
-
-
-def render_inline_docs_html(spec):
-    """Fallback left-panel HTML for stages not covered by tomogration_docs.json:
-    render the stage's own inline docs dict (what/range/effect/pitfall)."""
-    d = spec.get("docs", {})
-    h = [f"<h2 style='color:#eaeaea;margin:0 0 8px 0;'>{_h(spec['label'])}</h2>"]
-    for key, head, col in (("what", "WHAT", "#9ec5ff"), ("range", "RANGE", "#9a9a9a"),
-                           ("effect", "EFFECT", "#9a9a9a")):
-        if d.get(key) and d.get(key) != "n/a":
-            h.append(f"<p style='margin:6px 0;'><b style='color:{col};'>{head}</b><br>"
-                     f"{_h(d[key])}</p>")
-    if d.get("pitfall"):
-        h.append(f"<p style='margin:8px 0;'><b style='color:#e24b4a;'>PITFALL</b><br>"
-                 f"<span style='color:#f0a0a0;'>{_h(d['pitfall'])}</span></p>")
-    return "".join(h)
-
-
-def stage_defaults(spec):
-    """{param_name: default} for a stage — the values the widgets start at."""
-    return {p["name"]: p.get("default") for p in spec.get("params", [])}
-
-
-def _norm_gpu(s, sep):
-    """Normalise a GPU-id list to the separator the target tool wants, so the user
-    can type either '0 1 2 3' or '0,1,2,3' anywhere and it comes out correct
-    (WarpTools/AreTomo need spaces; RELION/miss-alignment need commas). No-op when
-    the param has no gpu_sep hint."""
-    if not sep or not s:
-        return s
-    return sep.join(t for t in re.split(r"[ ,]+", s.strip()) if t)
-
-
-def build_command(spec, values, warp_cmd=None, group_inputs=None):
-    """Pure command assembler (no Qt) — the single source of truth the editable
-    command box is seeded from. env/env_int params become a VAR=value prefix;
-    checks emit their flag when truthy; flagged params emit 'flag value';
-    flag=None params emit their value positionally, in declaration order.
-
-    base = (env prefix) + spec.base + (flags/positionals). If warp_cmd is given,
-    a leading 'WarpTools' in the base is replaced by it (so the user's module
-    load / conda activate / path runs before every WarpTools subcommand)."""
-    env_parts, body_parts = [], []
-    for p in spec.get("params", []):
-        v = values.get(p["name"])
-        kind = p["kind"]
-        if kind in ("env", "env_int"):
-            s = _norm_gpu(str(v).strip(), p.get("gpu_sep"))
-            if s != "":
-                env_parts.append(f"{p['flag']}='{s}'" if any(c in s for c in " \t")
-                                 else f"{p['flag']}={s}")
-        elif kind == "check":
-            if v:
-                body_parts.append(p["flag"])
-        else:
-            s = _norm_gpu(str(v).strip(), p.get("gpu_sep"))
-            if s != "":
-                body_parts.append(f"{p['flag']} {s}" if p.get("flag") else s)
-    # Active tilt-series group: restrict this step to the subset via --input_data
-    # (unless the user already typed an --input_data into the params).
-    scope = spec.get("group_scope")
-    if (group_inputs and scope and group_inputs.get(scope)
-            and not any(part.startswith("--input_data") for part in body_parts)):
-        body_parts.append(f"--input_data {group_inputs[scope]}")
-    # Always-on VAR=value the stage bakes in (e.g. MA_MODE=infer) — kept out of the
-    # form so there's no confusing editable field for a value that must not change.
-    for k, v in (spec.get("fixed_env") or {}).items():
-        env_parts.insert(0, f"{k}={v}")
-    base = spec.get("base", "")
-    if warp_cmd and base.startswith("WarpTools"):
-        base = warp_cmd + base[len("WarpTools"):]
-    segs = []
-    if env_parts:
-        segs.append(" ".join(env_parts))
-    if base:
-        segs.append(base)
-    segs.extend(body_parts)
-    cmd = " ".join(segs)
-    # Vars that must be EXPORTED into the shell before the tool runs. A bare
-    # "VAR=val cmd" prefix only applies to the first word, which for WarpTools is
-    # `module` (base = "module load … && conda activate … && WarpTools …"), so the
-    # var would never reach WarpTools. `export VAR=val && …` puts it in the
-    # environment for the whole chain. (ts_reconstruct needs WARP_FORCE_MRC_FLOAT32=1
-    # so its tomograms are float32 and IMOD/3dmod can read them.)
-    exports = spec.get("env_export")
-    if exports:
-        ex = " ".join(f"{k}={v}" for k, v in exports.items())
-        cmd = f"export {ex} && {cmd}"
-    return cmd
-
-
-# Primary output directory per stage (relative to the project root) for the
-# per-step "open output" button + iteration dropdown. "aretomo" = the versioned
-# AreTomo folders. Stages absent here (tool/action steps) get no output controls.
-STAGE_OUTPUTS = {
-    "rename": ".", "imod_warp_key": ".", "remake_mdocs": "mdocs",
-    "gain_convert": "gains", "gain_reciprocal": "gains",
-    "create_settings_fs": "warp_frameseries", "fs_motion_and_ctf": "warp_frameseries",
-    "create_settings_ts": "warp_tiltseries", "ts_import": "tomostar",
-    "ts_stack": "warp_tiltseries/tiltstack", "aretomo": "aretomo",
-    "miss_align": "warp_tiltseries", "miss_align_infer": "warp_tiltseries",
-    "ts_import_alignments": "warp_tiltseries", "ts_ctf": "warp_tiltseries",
-    "ts_reconstruct": "warp_tiltseries/reconstruction",
-    "ts_template_match": "warp_tiltseries/matching",
-    "threshold_picks": "warp_tiltseries/matching", "ts_export_particles": "relion4",
-    "relion4_convert": "relion4", "relion4_class3d": "relion4",
-}
-
-# Which mockup column each stage group belongs to (the three job-list panels).
-COLUMN_OF_GROUP = {
-    "1. Data prep": "curation", "2. Gain": "curation",
-    "3. Frameseries": "stackprep", "4. Tilt series": "stackprep",
-    "5. Alignment": "alignrecon", "6. CTF": "alignrecon",
-    "7. Reconstruct": "alignrecon", "8. Pick": "alignrecon",
-    "9. Export": "alignrecon", "10. RELION 4": "alignrecon",
-}
-COLUMN_TITLES = {
-    "curation": "Tilt curation", "stackprep": "Stack preparation",
-    "alignrecon": "Alignment & Reconstruction",
-}
-
-# Directory-overview schematic: the key project dirs to draw, in pipeline order.
-KEY_DIRS = [
-    ("frames", "frames/"), ("mdocs", "mdocs/"), ("gains", "gains/"),
-    ("Thumbnails", "Thumbnails/"),
-    ("warp_frameseries", "warp_frameseries/"),
-    ("tomostar", "tomostar/"),
-    ("warp_tiltseries", "warp_tiltseries/"),
-    ("warp_tiltseries/tiltstack", "…/tiltstack/"),
-    ("aretomo_output", "aretomo_output*/"),
-    ("warp_tiltseries/reconstruction", "…/reconstruction/"),
-    ("warp_tiltseries/matching", "…/matching/"),
-    ("relion4/warp", "relion4/ (RELION project)"),
-]
-# Per-stage (inputs, outputs) as dir paths relative to the project root — drives
-# the directory-overview highlighting (blue=input, green=output, grey=other).
-STAGE_IO = {
-    "rename":               (["."], ["mdocs", "frames"]),
-    "imod_warp_key":        (["mdocs"], ["."]),
-    "inspect_select":       (["Thumbnails", "mdocs"], ["mdocs"]),
-    "remake_mdocs":         (["mdocs"], ["mdocs"]),
-    "gain_convert":         (["gains"], ["gains"]),
-    "gain_reciprocal":      (["gains"], ["gains"]),
-    "create_settings_fs":   (["frames", "gains"], ["warp_frameseries"]),
-    "fs_motion_and_ctf":    (["frames", "warp_frameseries"], ["warp_frameseries"]),
-    "create_settings_ts":   (["mdocs"], ["warp_tiltseries"]),
-    "ts_import":            (["mdocs", "warp_frameseries"], ["tomostar", "warp_tiltseries"]),
-    "ts_stack":             (["warp_tiltseries", "tomostar"], ["warp_tiltseries/tiltstack"]),
-    "aretomo":              (["warp_tiltseries/tiltstack"], ["aretomo_output"]),
-    "miss_align":           (["warp_tiltseries", "warp_tiltseries/tiltstack"], ["warp_tiltseries"]),
-    "miss_align_infer":     (["warp_tiltseries", "warp_tiltseries/tiltstack"], ["warp_tiltseries"]),
-    "ts_import_alignments": (["aretomo_output", "warp_tiltseries"], ["warp_tiltseries"]),
-    "sync_selection":       (["warp_tiltseries"], ["warp_tiltseries"]),
-    "ts_defocus_hand":      (["warp_tiltseries"], ["warp_tiltseries"]),
-    "ts_ctf":               (["warp_tiltseries", "warp_tiltseries/tiltstack"], ["warp_tiltseries"]),
-    "ts_reconstruct":       (["warp_tiltseries"], ["warp_tiltseries/reconstruction"]),
-    "ts_template_match":    (["warp_tiltseries/reconstruction"], ["warp_tiltseries/matching"]),
-    "threshold_picks":      (["warp_tiltseries/matching"], ["warp_tiltseries/matching"]),
-    "ts_export_particles":  (["warp_tiltseries", "warp_tiltseries/matching"], ["relion4/warp"]),
-    "relion4_convert":      (["relion4/warp"], ["relion4/warp"]),
-    "relion4_class3d":      (["relion4/warp"], ["relion4/warp"]),
-}
-
-# Generic filename patterns each key directory is searched for — shown in the
-# Job details INPUTS/OUTPUTS lists so the user knows WHICH files a step consumes
-# or produces in each folder (not just the folder name). Keyed by the same rel
-# dirs used in STAGE_IO.
-DIR_FILE_HINTS = {
-    "frames": "*.eer  (raw movies)",
-    "mdocs": "*.mdoc  (per-series)",
-    "gains": "*.gain / gain reference",
-    "Thumbnails": "*.mrc  (per-series montage)",
-    "warp_frameseries": "*.xml  (per-movie metadata)",
-    "tomostar": "*.tomostar  (per-series)",
-    "warp_tiltseries": "*.xml  (per-series metadata)",
-    "warp_tiltseries/tiltstack": "*.st + *.rawtlt  (aligned stacks)",
-    "aretomo_output": "Imod/*.xf  (alignments)",
-    "warp_tiltseries/reconstruction": "*_<angpix>Apx.mrc  (tomograms)",
-    "warp_tiltseries/matching": "*_<suffix>.star  (pick lists)",
-    "relion4/warp": "*.star + subtomo/*.mrc",
-    ".": "(project root)",
-}
-
-# Retired: the app used to archive ts_reconstruct/ts_template_match outputs to
-# <dir>.bak_<ts> on re-run so nothing was lost. That surprised users (their
-# terminal-made picks got moved aside) and the job model supersedes it — each job
-# writes its OWN jobs/J### dir, so variants coexist without shuffling shared dirs.
-# Kept empty (not deleted) so _record_history_start stays a no-op archiver.
-ARCHIVE_ON_RERUN = set()
-
-# Back-half stages that produce a self-contained product and are worth running as
-# JOB instances (own dir, forkable, interconnectable) rather than overwriting the
-# shared trunk. ▶ Run offers to build these as a job. NOTE ts_template_match is NOT
-# here: it reads the SHARED reconstructions and its --override_suffix already keeps
-# pick sets distinct, so it runs on the trunk and is surfaced as a card by the
-# discover/adopt flow (a per-job dir would hide the reconstructions from it).
-JOB_STAGES = {"ts_ctf", "ts_reconstruct", "threshold_picks",
-              "ts_export_particles", "relion4_convert", "relion4_class3d"}
-
-# WarpTools stages that must run on the TRUNK (no --output_processing): they read
-# shared products (reconstructions) that only exist in the trunk processing dir, and
-# distinguish their own output by suffix. Wiring them to a job dir makes WarpTools
-# look for those shared inputs in the empty job dir ("reconstruction not found").
-TRUNK_STAGES = {"ts_template_match"}
-
-# File-open routing for the Processing-History detail view.
-THREEDMOD_EXTS = {".mrc", ".mrcs", ".st", ".ali", ".rec", ".preali", ".mod", ".map"}
-TEXT_EXTS = {".txt", ".star", ".xml", ".mdoc", ".settings", ".yaml", ".yml",
-             ".log", ".csv", ".com", ".json", ".tlt", ".rawtlt", ".xf", ".aln"}
-
 MONO = "Menlo, Consolas, monospace"
 DOT_GREY = "color:#bbb;font-size:14px;"
 DOT_GREEN = "color:#27ae60;font-size:14px;"
@@ -2353,582 +288,6 @@ NONATIVE = QFileDialog.Option.DontUseNativeDialog
 # so dirs-only skips stat-ing the thousands of .eer/.mrc/.mdoc.
 NONATIVE_DIR = QFileDialog.Option.DontUseNativeDialog | QFileDialog.Option.ShowDirsOnly
 
-
-# ===========================================================================
-# JOB MODEL (Phase 1) — a CryoSPARC-style DAG of job INSTANCES.
-#
-# The three-column view treats each STAGE as a singleton whose result lives at
-# one conventional path (STAGE_OUTPUTS). The card view instead models each RUN
-# as a job instance with its OWN processing directory, wired to upstream jobs by
-# named input slots. This is possible because every WarpTools command accepts
-# --input_processing / --output_processing (they live in BaseCommand): a job
-# READS its parent's processing dir and WRITES its own, sharing no mutable state.
-# Verified on the VM 2026-07-10 — a branched `ts_ctf --output_processing
-# warp_tiltseries_b` left the trunk XML byte-identical (md5 OK), kept all upstream
-# alignment metadata (size 430,737 -> 431,020, not a stripped rewrite), and a
-# `ts_reconstruct --input_processing warp_tiltseries_b` read it back and
-# reconstructed. Non-WarpTools wrappers (aretomo, miss_align, relion4_*) take
-# explicit in/out dirs instead, so they get no processing-dir flags here.
-#
-# Store: .tomogration_jobs.json in the project root:
-#     {"seq": <int>, "jobs": {"J1": {..job..}, "J2": {...}}}
-# This whole layer is PURE (stdlib only, no Qt) so it unit-tests off the VM; the
-# GUI wiring (dispatch, the canvas) sits on top of it in the Tomogration class.
-# ===========================================================================
-JOBS_FILE = ".tomogration_jobs.json"
-JOB_STATUSES = ("queued", "running", "completed", "failed")
-
-
-def jobs_path(root):
-    return Path(root) / JOBS_FILE
-
-
-def load_jobs(root):
-    """The job store {'seq': int, 'jobs': {id: job}} — empty scaffold if missing
-    or unreadable (same defensive contract as load_history)."""
-    p = jobs_path(root)
-    if not p.is_file():
-        return {"seq": 0, "jobs": {}}
-    try:
-        data = json.loads(p.read_text())
-    except (OSError, ValueError):
-        return {"seq": 0, "jobs": {}}
-    if not isinstance(data, dict) or not isinstance(data.get("jobs"), dict):
-        return {"seq": 0, "jobs": {}}
-    data.setdefault("seq", len(data["jobs"]))
-    return data
-
-
-def save_jobs(root, store):
-    try:
-        jobs_path(root).write_text(json.dumps(store, indent=1))
-    except OSError:
-        pass
-
-
-def job_output_dir(job_id):
-    """A job's processing dir, relative to the project root (cwd of every run)."""
-    return f"jobs/{job_id}"
-
-
-def new_job(root, stage_id, label, params, inputs=None):
-    """Create + persist a fresh job; return the record. `inputs` maps an input
-    slot name -> the parent job id feeding it (or None = read the project trunk /
-    the .settings default). Ids are monotonic 'J<seq>' so they never collide even
-    after deletions."""
-    store = load_jobs(root)
-    store["seq"] = int(store.get("seq", 0)) + 1
-    jid = f"J{store['seq']}"
-    job = {
-        "id": jid,
-        "stage_id": stage_id,
-        "label": label,
-        "params": dict(params or {}),
-        "inputs": dict(inputs or {}),
-        "output_dir": job_output_dir(jid),
-        "command": "",
-        "status": "queued",
-        "exit_code": None,
-        "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "started": None,
-        "finished": None,
-        "summary": {},
-    }
-    store["jobs"][jid] = job
-    save_jobs(root, store)
-    return job
-
-
-def update_job(root, job_id, **fields):
-    """Merge `fields` into a stored job; return it (or None if unknown id)."""
-    store = load_jobs(root)
-    job = store.get("jobs", {}).get(job_id)
-    if job is None:
-        return None
-    job.update(fields)
-    save_jobs(root, store)
-    return job
-
-
-def is_warp_stage(spec):
-    """True for stages whose command is a WarpTools subcommand — the ones that
-    accept --input_processing / --output_processing for free (BaseCommand)."""
-    return str(spec.get("base", "")).startswith("WarpTools")
-
-
-def parent_job_id(job):
-    """The single upstream job whose processing dir this job reads: the
-    'processing' input slot, else the first slot carrying a job id."""
-    inputs = job.get("inputs", {}) or {}
-    if inputs.get("processing"):
-        return inputs["processing"]
-    for v in inputs.values():
-        if v:
-            return v
-    return None
-
-
-def io_flags_for_job(spec, job, store):
-    """Extra tokens wiring a WarpTools job to its own processing dir (and its
-    parent's, if any). Wrapper stages return '' — they resolve in/out dirs by
-    their own means. A parent with no job id (trunk) yields no --input_processing,
-    so the run reads the .settings default, exactly like the three-column view.
-
-    threshold_picks is special: it reads AND writes its match stars in
-    <output_processing>/matching in place, so its inputs are STAGED into its own
-    dir (_prepare_job_inputs) and it only takes --output_processing (a stale
-    --input_processing at the parent, which has no .xml, would look for previous
-    results in the wrong place)."""
-    if not is_warp_stage(spec):
-        return ""
-    if spec.get("id") in TRUNK_STAGES:
-        return ""            # trunk-only: reads shared reconstructions, suffix-distinct output
-    toks = []
-    pid = parent_job_id(job)
-    parent = store.get("jobs", {}).get(pid) if pid else None
-    if parent and spec.get("id") != "threshold_picks":
-        toks.append(f"--input_processing {parent['output_dir']}")
-    toks.append(f"--output_processing {job['output_dir']}")
-    return " ".join(toks)
-
-
-def build_job_command(spec, job, store, warp_cmd=None, group_inputs=None):
-    """A job's exact command = the pure stage command (build_command, unchanged)
-    plus this job's processing-dir wiring. Manual --*_processing already typed
-    into the params wins (we don't double it)."""
-    cmd = build_command(spec, job.get("params", {}), warp_cmd, group_inputs)
-    extra = io_flags_for_job(spec, job, store)
-    if extra and "--output_processing" not in cmd and "--input_processing" not in cmd:
-        cmd = f"{cmd} {extra}"
-    # {jobid} in any param resolves to THIS job's id, so a stage whose output must
-    # live outside jobs/ (the RELION handoff needs one project dir with the star +
-    # subtomo/) still gets a per-job, collision-free home: relion4/{jobid} ->
-    # relion4/J13. No shared default for a second run to overwrite.
-    cmd = cmd.replace("{jobid}", job.get("id", ""))
-    return cmd
-
-
-def _jobnum(jid):
-    """Numeric part of a 'J<seq>' id, for newest-first ordering."""
-    try:
-        return int(str(jid).lstrip("J"))
-    except ValueError:
-        return 0
-
-
-def default_parent_for(stage_id, store):
-    """When building a new job for `stage_id`, pick a sensible default input: the
-    newest WarpTools job of the nearest preceding WarpTools stage (only warp
-    stages have a processing dir worth reading via --input_processing). None means
-    'read the project trunk / .settings default', like the three-column view."""
-    order = [s["id"] for s in STAGES]
-    if stage_id not in order:
-        return None
-    jobs = store.get("jobs", {})
-    for up in reversed(order[:order.index(stage_id)]):
-        spec = next((s for s in STAGES if s["id"] == up), None)
-        if not spec or not is_warp_stage(spec):
-            continue
-        cands = [jid for jid, j in jobs.items() if j.get("stage_id") == up]
-        if cands:
-            return max(cands, key=_jobnum)
-    return None
-
-
-def delete_job(root, job_id):
-    """Remove a job record from the store (leaves any jobs/<id>/ dir on disk —
-    outputs are never auto-deleted). Returns True if a record was removed."""
-    store = load_jobs(root)
-    if job_id in store.get("jobs", {}):
-        del store["jobs"][job_id]
-        save_jobs(root, store)
-        return True
-    return False
-
-
-def fmt_angpix(a):
-    """Warp names reconstructions/matches with a 2-decimal pixel size, e.g. '10' ->
-    '10.00', '12.56' -> '12.56' (Position042_12.56Apx.mrc)."""
-    try:
-        return f"{float(a):.2f}"
-    except (TypeError, ValueError):
-        return str(a)
-
-
-def template_corr_suffix(params):
-    """Suffix on the CORRELATION VOLUME (_corr.mrc) + score maps: ALWAYS the
-    template-derived name (_emd_<code> / _<stem>). The corr volume is the
-    template×tomogram cross-correlation, so --override_suffix does NOT rename it —
-    only the peak-list STAR. (Confirmed on disk: v2 stars alongside _emd_70905_corr.mrc.)"""
-    emdb = str(params.get("template_emdb", "") or "").strip()
-    if emdb:
-        return f"_emd_{emdb}"
-    tp = str(params.get("template_path", "") or "").strip()
-    if tp:
-        return "_" + os.path.splitext(os.path.basename(tp))[0]
-    return ""
-
-
-def template_match_suffix(params):
-    """The STAR suffix a ts_template_match run writes: an explicit --override_suffix
-    if set (used verbatim, leading underscore and all), else the template-derived
-    name (same as the corr volume)."""
-    ov = str(params.get("override_suffix", "") or "").strip()
-    return ov if ov else template_corr_suffix(params)
-
-
-def match_star_infix(params):
-    """threshold_picks --in_suffix = the WHOLE middle of a template-match star name,
-    '<tomo_angpix>Apx<suffix>' (e.g. 12.56Apx_v3-optimized) — because WarpTools looks
-    for {item}_{in_suffix}.star. NOT just the override suffix (that's the recurring
-    'No files found matching PositionNNN_<suffix>.star.star' trap)."""
-    return f"{fmt_angpix(params.get('tomo_angpix', ''))}Apx{template_match_suffix(params)}"
-
-
-# Valid next stages for "Build downstream" from a job card (the DAG's forward
-# edges among the forkable back-half stages).
-DOWNSTREAM = {
-    "ts_ctf": ["ts_reconstruct"],
-    "ts_reconstruct": ["ts_template_match"],
-    "ts_template_match": ["threshold_picks", "ts_export_particles"],
-    "threshold_picks": ["ts_export_particles"],
-    "ts_export_particles": ["relion4_convert"],
-    "relion4_convert": ["relion4_class3d"],
-}
-
-
-def _picktag(in_suffix):
-    """Short, filesystem-safe pick-set tag from a threshold in_suffix, stripping the
-    '<angpix>Apx' prefix + leading underscore: '12.56Apx_v3-optimized' ->
-    'v3-optimized'. Used to name each export's RELION dir so it maps to its pick set."""
-    t = re.sub(r"^[\d.]+Apx", "", in_suffix or "").lstrip("_")
-    return t or "picks"
-
-
-def derive_child_params(child_stage, parent_stage, parent_params, parent_output_dir=""):
-    """Params a downstream job should inherit from its chosen parent, so wiring
-    'J5 -> threshold -> export -> convert -> Class3D' auto-fills the fiddly
-    suffix/pattern/dir instead of the user reverse-engineering it. Two things this
-    threads: ts_export_particles reads pick STARs from --input_directory (NOT
-    --input_processing), so it points at the parent job's matching dir; and each
-    export writes into a pick-set-named RELION dir (relion4/<tag>/) so multiple
-    exports never collide and the RELION input path maps to its pick set."""
-    if child_stage == "threshold_picks" and parent_stage == "ts_template_match":
-        return {"in_suffix": match_star_infix(parent_params)}
-    if child_stage == "ts_export_particles":
-        mdir = f"{parent_output_dir}/matching" if parent_output_dir else "warp_tiltseries/matching"
-        if parent_stage == "threshold_picks":
-            infix = parent_params.get("in_suffix", "")
-            out = parent_params.get("out_suffix", "clean")
-            pat = f"*{infix}_{out}.star"
-        else:                                   # straight from template matching
-            infix = match_star_infix(parent_params)
-            pat = f"*{infix}.star"
-        outdir = f"relion4/{_picktag(infix)}"   # e.g. relion4/v3-optimized
-        return {"input_directory": mdir, "input_pattern": pat,
-                "output_processing": outdir, "output_star": f"{outdir}/matching.star"}
-    if child_stage == "relion4_convert" and parent_stage == "ts_export_particles":
-        outdir = parent_params.get("output_processing", "relion4/warp")
-        # resolve the export's {jobid} to its concrete id so convert runs in the
-        # SAME dir the export wrote to (relion4/J13), not convert's own job id.
-        outdir = outdir.replace("{jobid}", os.path.basename(parent_output_dir or ""))
-        return {"project_dir": outdir,
-                "starfile": os.path.basename(parent_params.get("output_star", "matching.star"))}
-    if child_stage == "relion4_class3d" and parent_stage == "relion4_convert":
-        outdir = parent_params.get("project_dir", "relion4/warp")
-        base = os.path.splitext(os.path.basename(parent_params.get("starfile", "matching.star")))[0]
-        return {"project_dir": outdir, "particles": f"{base}_conv.star"}
-    return {}
-
-
-# ---- per-stage result summaries (the one-line card readout) ----------------
-# summarize_job(stage_id, job_abs_dir) -> {label: value}. A card must NEVER
-# enumerate thousands of ceph files on the Qt thread (that crash is why
-# ask_project_root / the History 40-cap exist), so counts are bounded and the
-# specific parsers touch only a small fixed set of fields. All defensive: any
-# error -> {}. Stage-specific parsers (ts_ctf defocus, tomogram counts, pick
-# scores) are registered in STAGE_SUMMARIZERS as the real Warp XML/STAR layout is
-# confirmed against a VM sample; until then every stage uses summarize_generic.
-def _count_glob(dir_path, pattern, cap=5000):
-    """(count, capped) for files matching pattern; stops at cap so a huge ceph
-    dir never blocks the caller."""
-    n = 0
-    try:
-        for _ in Path(dir_path).glob(pattern):
-            n += 1
-            if n >= cap:
-                return n, True
-    except OSError:
-        pass
-    return n, False
-
-
-def summarize_generic(job_dir):
-    """Cheap fallback: how many of each product type the job wrote."""
-    d = Path(job_dir)
-    if not d.is_dir():
-        return {}
-    out = {}
-    for ext, key in ((".mrc", "mrc"), (".star", "star"), (".xml", "xml")):
-        n, capped = _count_glob(d, f"*{ext}")
-        if n:
-            out[key] = f"{n}+" if capped else n
-    return out
-
-
-# One <CTF> block per series XML holds the fitted per-series AVERAGE defocus as
-# `<Param Name="Defocus" Value="5.25432" />` (µm); DefocusDelta = astigmatism mag,
-# DefocusAngle = its angle. The per-TILT values live in <GridCTF><Node Value=.../>
-# (no Name= attr), so `Name="Defocus"` matches the scalar uniquely. The <CTF> block
-# sits near the top, before the long GridCTF node lists, so a bounded head read
-# gets it without parsing the whole (~430 KB) file. (VM sample 2026-07-10.)
-_CTF_DEFOCUS_RE = re.compile(r'Name="Defocus"\s+Value="([-\d.eE]+)"')
-_APX_RE = re.compile(r'_([\d.]+)Apx\.mrc$')
-
-
-def _mean_std(vals):
-    m = sum(vals) / len(vals)
-    return m, (sum((v - m) ** 2 for v in vals) / len(vals)) ** 0.5
-
-
-def summarize_ts_ctf(job_dir):
-    """series count + mean±std of the per-series average defocus (µm)."""
-    d = Path(job_dir)
-    if not d.is_dir():
-        return {}
-    vals = []
-    for xml in itertools.islice(sorted(d.glob("*.xml")), 0, 5000):
-        try:
-            with xml.open("r", errors="ignore") as fh:
-                head = fh.read(16384)               # <CTF> is well within this
-        except OSError:
-            continue
-        m = _CTF_DEFOCUS_RE.search(head)
-        if m:
-            try:
-                vals.append(float(m.group(1)))
-            except ValueError:
-                pass
-    if not vals:
-        return {}
-    mean, std = _mean_std(vals)
-    return {"series": len(vals), "defocus_um": f"{mean:.2f} ± {std:.2f}"}
-
-
-def summarize_ts_reconstruct(job_dir):
-    """tomogram count (+ pixel size parsed from the ..._<N>Apx.mrc name). A job's
-    tomograms land in <job>/reconstruction/ (confirmed on the VM branch test)."""
-    rec = Path(job_dir) / "reconstruction"
-    if not rec.is_dir():
-        return {}
-    n, apx = 0, None
-    for mrc in itertools.islice(rec.glob("*.mrc"), 0, 5000):
-        n += 1
-        if apx is None:
-            m = _APX_RE.search(mrc.name)
-            if m:
-                apx = m.group(1)
-    if not n:
-        return {}
-    out = {"tomograms": n}
-    if apx:
-        out["angpix"] = apx
-    return out
-
-
-STAGE_SUMMARIZERS = {
-    "ts_ctf": summarize_ts_ctf,
-    "ts_reconstruct": summarize_ts_reconstruct,
-}
-
-
-def summarize_job(stage_id, job_dir):
-    fn = STAGE_SUMMARIZERS.get(stage_id, summarize_generic)
-    try:
-        return fn(job_dir) or {}
-    except Exception:
-        return {}
-
-
-# ===========================================================================
-# Card-canvas layout (Phase 2) — PURE (no Qt), so it's unit-testable. Maps the
-# job store + STAGES onto positioned nodes + edges the QGraphicsView draws.
-# ===========================================================================
-CARD_W, CARD_H = 210, 92          # card box size (scene units)
-GAP_X, GAP_Y = 44, 30             # spacing between forks (x) and stages (y)
-
-
-def summary_text(summary):
-    """One-line human readout for a job card, from its summary dict. Known keys
-    get friendly units; anything else falls back to 'value key' pairs."""
-    if not summary:
-        return ""
-    parts = []
-    if "series" in summary:
-        parts.append(f"{summary['series']} series")
-    if "defocus_um" in summary:
-        parts.append(f"{summary['defocus_um']} µm")
-    if "tomograms" in summary:
-        parts.append(f"{summary['tomograms']} tomo")
-    if "angpix" in summary:
-        parts.append(f"{summary['angpix']} Å")
-    if not parts:
-        parts = [f"{v} {k}" for k, v in list(summary.items())[:2]]
-    return " · ".join(parts)
-
-
-# Human-readable card titles (the STAGES 'label' is the raw command name, which
-# reads like jargon on a card). Falls back to the label for anything unlisted.
-FRIENDLY_TITLES = {
-    "rename": "Rename EER + MDOC", "imod_warp_key": "IMOD → Warp key",
-    "inspect_select": "Inspect tilt stacks", "remake_mdocs": "Remake MDOCs",
-    "gain_convert": "Gain: convert", "gain_reciprocal": "Gain: reciprocal",
-    "create_settings_fs": "Frameseries settings", "fs_motion_and_ctf": "Motion + CTF",
-    "create_settings_ts": "Tilt-series settings", "ts_import": "Import tilt series",
-    "ts_stack": "Build tilt stacks", "aretomo": "Align (AreTomo2)",
-    "miss_align": "Refine alignment (train)", "miss_align_infer": "Refine alignment (infer)",
-    "ts_import_alignments": "Import alignments", "sync_selection": "Sync selection",
-    "ts_defocus_hand": "Defocus handedness", "ts_ctf": "CTF estimation",
-    "ts_reconstruct": "Tomogram reconstruction", "ts_template_match": "Template matching",
-    "threshold_picks": "Threshold picks", "ts_export_particles": "Export particles",
-    "relion4_convert": "RELION 4: convert STAR", "relion4_class3d": "RELION 4: Class3D",
-}
-
-
-def stage_title(stage_id, fallback=""):
-    return FRIENDLY_TITLES.get(stage_id, fallback or stage_id)
-
-
-def canvas_layout(store, orphans=None):
-    """Positioned workflow graph for the canvas. Returns (nodes, edges).
-
-    One ROW per stage, in canonical STAGES order. A stage with no jobs shows a
-    single greyed GHOST node ('the default workflow, not yet run'); a stage with
-    jobs shows one real node per job, spread across COLUMNS so forks sit side by
-    side. Edges: real jobs link to their parent job (the true DAG); stages with
-    no real parent are chained along the ghost trunk so the default pipeline
-    reads as a connected flow. `orphans` (from discover_picksets) are on-disk
-    outputs made outside the app — placed as extra 'orphan' cards in their stage's
-    row, offering adoption."""
-    jobs = store.get("jobs", {}) if isinstance(store, dict) else {}
-    by_stage = {}
-    for jid, job in jobs.items():
-        by_stage.setdefault(job.get("stage_id"), []).append((jid, job))
-    for lst in by_stage.values():
-        lst.sort(key=lambda t: t[0])
-
-    nodes, index, row_first, row_of, cols_used = [], {}, {}, {}, {}
-    for row, spec in enumerate(STAGES):
-        sid = spec["id"]
-        row_of[sid] = row
-        y = row * (CARD_H + GAP_Y)
-        title = stage_title(sid, spec.get("label", sid))
-        js = by_stage.get(sid, [])
-        cols_used[sid] = max(1, len(js))
-        if not js:
-            nid = f"ghost:{sid}"
-            n = {"id": nid, "stage_id": sid, "label": spec.get("label", sid),
-                 "title": title, "group": spec.get("group", ""), "row": row, "col": 0,
-                 "x": 0, "y": y, "w": CARD_W, "h": CARD_H,
-                 "is_ghost": True, "status": "ghost", "summary": {}}
-            nodes.append(n)
-            index[nid] = n
-            row_first[sid] = nid
-        else:
-            for col, (jid, job) in enumerate(js):
-                fork = "(fork)" in str(job.get("label", ""))
-                n = {"id": jid, "stage_id": sid,
-                     "label": job.get("label", spec.get("label", sid)),
-                     "title": title + (" (fork)" if fork else ""),
-                     "group": spec.get("group", ""), "row": row, "col": col,
-                     "x": col * (CARD_W + GAP_X), "y": y,
-                     "w": CARD_W, "h": CARD_H, "is_ghost": False,
-                     "status": job.get("status", "queued"),
-                     "summary": job.get("summary", {}) or {}}
-                nodes.append(n)
-                index[jid] = n
-            row_first[sid] = js[0][0]
-
-    edges, has_real_parent = [], set()
-    for jid, job in jobs.items():
-        parent = next((pid for pid in (job.get("inputs") or {}).values()
-                       if pid and pid in index), None)
-        if parent:
-            edges.append((parent, jid))
-            has_real_parent.add(job.get("stage_id"))
-    order = [s["id"] for s in STAGES]
-    for a, b in zip(order, order[1:]):
-        if b in has_real_parent:          # already linked via a real parent edge
-            continue
-        src, dst = row_first.get(a), row_first.get(b)
-        if src and dst:
-            edges.append((src, dst))
-
-    # Orphan cards: on-disk pick sets made outside the app, placed after the real
-    # jobs in their stage's row and flagged so the UI can offer 'Adopt as job'.
-    for i, orph in enumerate(orphans or []):
-        sid = orph.get("stage_id", "ts_template_match")
-        if sid not in row_of:
-            continue
-        col = cols_used.get(sid, 1)
-        cols_used[sid] = col + 1
-        oid = f"orphan:{sid}:{orph.get('dir','')}:{orph.get('suffix','')}"
-        nodes.append({
-            "id": oid, "stage_id": sid, "is_orphan": True, "is_ghost": False,
-            "label": orph.get("suffix", "?"),
-            "title": stage_title(sid) + " · orphan",
-            "group": "found on disk", "status": "orphan",
-            "row": row_of[sid], "col": col,
-            "x": col * (CARD_W + GAP_X), "y": row_of[sid] * (CARD_H + GAP_Y),
-            "w": CARD_W, "h": CARD_H,
-            "summary": {"series": orph.get("n_series", 0)},
-            "orphan": orph,
-        })
-    return nodes, edges
-
-
-_PICK_STAR_RE = re.compile(r'^(Position\d+)_([\d.]+)Apx(.+)\.star$')
-
-
-def discover_picksets(root, store):
-    """Scan warp_tiltseries/matching[.bak_*]/ for template-match pick sets made
-    OUTSIDE the app (distinct by suffix) that aren't already a job. Returns orphan
-    descriptors {stage_id, suffix, dir, angpix, n_series} for the canvas to surface
-    as adoptable cards. Bounded + lazy (never enumerates whole data dirs)."""
-    root = Path(root)
-    known = set()
-    for j in (store.get("jobs", {}) if isinstance(store, dict) else {}).values():
-        if j.get("stage_id") == "ts_template_match":
-            s = template_match_suffix(j.get("params", {}))
-            if s:
-                known.add(s)
-        if j.get("orphan_suffix"):        # an already-adopted set
-            known.add(j["orphan_suffix"])
-    found = {}
-    for mdir in sorted(root.glob("warp_tiltseries/matching*")):
-        if not mdir.is_dir():
-            continue
-        rel = os.path.relpath(mdir, root)
-        for star in itertools.islice(sorted(mdir.glob("Position*Apx*.star")), 0, 20000):
-            m = _PICK_STAR_RE.match(star.name)
-            if not m:
-                continue
-            series, angpix, suffix = m.groups()
-            d = found.setdefault((suffix, rel), {"suffix": suffix, "dir": rel,
-                                                 "angpix": angpix, "series": set()})
-            d["series"].add(series)
-    orphans = []
-    for (suffix, rel), d in sorted(found.items()):
-        if suffix in known:
-            continue
-        orphans.append({"stage_id": "ts_template_match", "suffix": suffix,
-                        "dir": rel, "angpix": d["angpix"], "n_series": len(d["series"])})
-    return orphans
-
-
-# ===========================================================================
-# QProcess wrapper: live stdout/stderr streaming + terminate
-# ===========================================================================
 class ProcessRunner(QObject):
     line = Signal(str, str)        # (text, level: out|err|info|ok|fail)
     finished = Signal(int)         # exit code
@@ -3970,11 +1329,32 @@ class _CanvasView(QGraphicsView):
     navigation that survives remote desktops: trackpad horizontal swipes and
     Shift+wheel scroll left/right; click-dragging empty canvas pans (clicks on
     cards still select, since a drag only starts where there's no item)."""
+    # Grab-hand ("pan") mode. Remote desktops routinely drop horizontal scroll
+    # events entirely (a MacBook two-finger swipe never reaches the Linux VM as
+    # angleDelta().x()), so panning must not depend on them. With hand mode ON,
+    # dragging ANYWHERE moves the canvas; with it off, dragging empty space pans
+    # and clicks still select cards.
+    hand_mode = False
+
+    def set_hand_mode(self, on):
+        self.hand_mode = bool(on)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag if self.hand_mode
+                         else QGraphicsView.DragMode.NoDrag)
+        self.viewport().setCursor(Qt.OpenHandCursor if self.hand_mode
+                                  else Qt.ArrowCursor)
+
     def wheelEvent(self, ev):
         d = ev.angleDelta()
         horiz = d.x()
         if horiz == 0 and (ev.modifiers() & Qt.ShiftModifier):
             horiz = d.y()
+        # No horizontal delta and no Shift: if the graph is far wider than tall
+        # (it always is — one row per stage, forks spreading right), plain vertical
+        # wheel is much more useful as horizontal pan than as a 2-row nudge.
+        if horiz == 0 and d.y():
+            hbar, vbar = self.horizontalScrollBar(), self.verticalScrollBar()
+            if hbar.maximum() > 0 and vbar.maximum() <= 0:
+                horiz = d.y()
         if horiz:
             bar = self.horizontalScrollBar()
             bar.setValue(bar.value() - horiz)
@@ -3982,17 +1362,142 @@ class _CanvasView(QGraphicsView):
         else:
             super().wheelEvent(ev)
 
+    def keyPressEvent(self, ev):
+        """Arrow keys pan — the fallback that works on every remote protocol."""
+        step = 200 if ev.modifiers() & Qt.ShiftModifier else 60
+        if ev.key() in (Qt.Key_Left, Qt.Key_Right):
+            bar = self.horizontalScrollBar()
+            bar.setValue(bar.value() + (step if ev.key() == Qt.Key_Right else -step))
+            ev.accept()
+            return
+        if ev.key() in (Qt.Key_Up, Qt.Key_Down):
+            bar = self.verticalScrollBar()
+            bar.setValue(bar.value() + (step if ev.key() == Qt.Key_Down else -step))
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
     def mousePressEvent(self, ev):
-        if ev.button() == Qt.LeftButton and self.itemAt(ev.pos()) is None:
+        if (ev.button() == Qt.LeftButton and not self.hand_mode
+                and self.itemAt(ev.pos()) is None):
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         super().mousePressEvent(ev)
 
     def mouseReleaseEvent(self, ev):
         super().mouseReleaseEvent(ev)
-        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        if not self.hand_mode:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+
+
+
+
+class GpuPanel(QWidget):
+    """A small always-on GPU monitor pinned to the canvas.
+
+    Replaces squinting at nvidia-smi. One row per GPU: a load bar, memory, temp.
+    Deliberately minimal — this is glanceable status, not a dashboard.
+
+    Two things it gets right that a naive version wouldn't:
+      * it polls with a QProcess, never a blocking subprocess call, so a slow or
+        hung nvidia-smi can't freeze the UI (the thing that just bit this app);
+      * it colours by UTILISATION, not memory. nvidia-smi hides other users' PIDs
+        on this cluster, so a GPU can look free by process list while another user
+        pins it at 100%. Load is the honest signal for 'can I run here?'.
+    """
+    QUERY = ("index,utilization.gpu,memory.used,memory.total,temperature.gpu")
+
+    def __init__(self, parent=None, interval_ms=5000):
+        super().__init__(parent)
+        self._rows = []                 # [(idx, util%, used_MiB, total_MiB, tempC)]
+        self._error = None
+        self._proc = None
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)   # never eats canvas clicks
+        self.setFixedWidth(196)
+        self._timer = QTimer(self)
+        self._timer.setInterval(interval_ms)
+        self._timer.timeout.connect(self.poll)
+        self._timer.start()
+        self.poll()
+
+    def poll(self):
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            return                       # previous poll still going; skip this tick
+        self._proc = QProcess(self)
+        self._proc.finished.connect(self._read)
+        self._proc.errorOccurred.connect(lambda _e: self._fail("nvidia-smi not found"))
+        self._proc.start("nvidia-smi",
+                         [f"--query-gpu={self.QUERY}", "--format=csv,noheader,nounits"])
+
+    def _fail(self, msg):
+        self._error, self._rows = msg, []
+        self._resize_to_rows()
+        self.update()
+
+    def _read(self):
+        try:
+            txt = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
+        except Exception:
+            return self._fail("nvidia-smi unreadable")
+        rows = []
+        for line in txt.strip().splitlines():
+            parts = [c.strip() for c in line.split(",")]
+            if len(parts) < 5:
+                continue
+            try:
+                rows.append((int(parts[0]), int(parts[1]), int(parts[2]),
+                             int(parts[3]), int(parts[4])))
+            except ValueError:
+                continue
+        if not rows:
+            return self._fail("no GPUs reported")
+        self._error, self._rows = None, rows
+        self._resize_to_rows()
+        self.update()
+
+    def _resize_to_rows(self):
+        """One compact cell per GPU, laid out horizontally to sit in the toolbar."""
+        self.setFixedWidth(max(120, 22 + 74 * max(1, len(self._rows))))
+        self.setFixedHeight(26)
+
+    def paintEvent(self, _ev):
+        pt = QPainter(self)
+        pt.setRenderHint(QPainter.RenderHint.Antialiasing)
+        f = QFont()
+        f.setPointSize(8)
+        pt.setFont(f)
+        pt.setPen(QColor("#6f6f6f"))
+        pt.drawText(2, 17, "GPU")
+        if self._error:
+            pt.setPen(QColor("#e0a850"))
+            pt.drawText(26, 17, self._error)
+            return
+        x = 24
+        for idx, util, used, total, temp in self._rows:
+            # colour by LOAD, not memory: nvidia-smi hides other users' PIDs on this
+            # cluster, so a GPU can look free by process list while pinned at 100%.
+            col = QColor("#27ae60") if util < 25 else (
+                QColor("#e0a850") if util < 80 else QColor("#e24b4a"))
+            pt.setPen(Qt.NoPen)
+            pt.setBrush(QColor("#242424"))
+            pt.drawRoundedRect(x, 3, 66, 20, 4, 4)          # cell
+            pt.setBrush(QColor("#333333"))
+            pt.drawRoundedRect(x + 4, 15, 58, 5, 2, 2)      # bar track
+            if util > 0:
+                pt.setBrush(col)
+                pt.drawRoundedRect(x + 4, 15, max(3, int(58 * util / 100)), 5, 2, 2)
+            pt.setPen(QColor("#9a9a9a"))
+            pt.drawText(x + 5, 12, str(idx))
+            pt.setPen(col)
+            pt.drawText(x + 16, 12, f"{util}%")
+            pt.setPen(QColor("#e24b4a") if temp >= 80 else QColor("#6f6f6f"))
+            pt.drawText(x + 40, 12, f"{temp}\u00b0")
+            x += 74
 
 
 class JobCanvas(QWidget):
+    # Seconds a per-stage on-disk status stays fresh (see refresh()).
+    STATUS_TTL = 45
+
     def __init__(self, root_getter, on_pick, on_details=None, on_menu=None,
                  on_orphans=None, on_active=None, parent=None):
         super().__init__(parent)
@@ -4000,6 +1505,7 @@ class JobCanvas(QWidget):
         self._on_pick = on_pick              # callable(stage_id)
         self._on_details = on_details        # callable(node) | None
         self._on_menu = on_menu              # callable(node, global_qpoint) | None
+        self._status_cache = None    # (ts, root, {stage: (ok,label)})
         self._on_orphans = on_orphans        # callable() -> [orphan descriptor] | None
         self._on_active = on_active          # callable() -> {running, label, progress,
                                              #                job_id|stage_id} | None
@@ -4008,9 +1514,64 @@ class JobCanvas(QWidget):
         self.view = _CanvasView(self.scene)
         self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.view.setBackgroundBrush(QColor("#0e0e0e"))
+        # Scrollbars ALWAYS visible: on a remote desktop they may be the only
+        # horizontal navigation that survives the protocol.
+        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.view.setFocusPolicy(Qt.StrongFocus)          # arrow keys pan
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.view)
+        lay.setSpacing(4)
+
+        tools = QHBoxLayout()
+        tools.setContentsMargins(4, 2, 4, 0)
+        tools.setSpacing(6)
+        self.hand_btn = QPushButton("✋ Pan")
+        self.hand_btn.setCheckable(True)
+        self.hand_btn.setToolTip("Grab-hand: drag anywhere to move the canvas.\n"
+                                 "Use this when your trackpad's horizontal scroll "
+                                 "doesn't reach the VM.")
+        self.hand_btn.toggled.connect(self.view.set_hand_mode)
+        tools.addWidget(self.hand_btn)
+        fit = QPushButton("Fit")
+        fit.setToolTip("Zoom to fit the whole workflow")
+        fit.clicked.connect(self.fit_all)
+        tools.addWidget(fit)
+        reset = QPushButton("1:1")
+        reset.setToolTip("Reset zoom")
+        reset.clicked.connect(lambda: self.view.resetTransform())
+        tools.addWidget(reset)
+        hint = QLabel("drag or ✋ to pan · ← → arrows")
+        hint.setStyleSheet("color:#6f6f6f;font-size:10px;")
+        tools.addWidget(hint)
+        tools.addStretch(1)
+        # GPU strip, right-aligned in the canvas toolbar = the top-right of the card
+        # view, positioned by the layout so it can never drift or scroll away.
+        # Guarded: decorative status must never stop the canvas from building.
+        self.gpu_panel = None
+        try:
+            self.gpu_panel = GpuPanel()
+            tools.addWidget(self.gpu_panel)
+        except Exception:
+            self.gpu_panel = None
+        tw = QWidget()
+        tw.setLayout(tools)
+        lay.addWidget(tw)
+        lay.addWidget(self.view, 1)
+
+    def _place_gpu_panel(self):
+        """No-op: the GPU strip is laid out by the toolbar, not free-floating.
+
+        It used to be a child widget of the graphics viewport, moved by hand to the
+        top-right on every resize/repaint. Manual overlay geometry is fiddly and
+        impossible to verify without running the GUI — it drifted into the middle of
+        the canvas and panned with the content. A right-aligned widget in the canvas
+        toolbar IS the top-right of the card view, and the layout keeps it there."""
+        return
+
+    def fit_all(self):
+        r = self.scene.itemsBoundingRect()
+        if r.isValid():
+            self.view.fitInView(r.adjusted(-20, -20, 20, 20), Qt.KeepAspectRatio)
 
     def refresh(self):
         # Keep the user's scroll position — this repaints every few seconds while a
@@ -4022,19 +1583,51 @@ class JobCanvas(QWidget):
             store = load_jobs(self._root_getter())
         except Exception:
             store = {"jobs": {}}
+        # Orphans (found-on-disk work) are NOT canvas nodes any more. With ~50
+        # RELION jobs they formed a mile-wide row that made the graph unreadable and
+        # forced a disk scan on every repaint. They live in the Found-on-disk drawer
+        # instead, and only appear here once adopted into the project.
         orphans = []
-        if self._on_orphans is not None:
-            try:
-                orphans = self._on_orphans() or []
-            except Exception:
-                orphans = []
         self._active = {}
         if self._on_active is not None:
             try:
                 self._active = self._on_active() or {}
             except Exception:
                 self._active = {}
-        nodes, edges = canvas_layout(store, orphans)
+        # Per-stage on-disk status, so stages run OUTSIDE the app (terminal / trunk
+        # runs, which create no job) still show as completed rather than 'not built'.
+        stage_status = {}
+        try:
+            # CACHED. Every stage's status lambda hits the filesystem (globs, counts),
+            # and this runs on every repaint — including every 5 s while a job is
+            # live. Rescanning ceph that often is what makes the UI stutter when a
+            # job starts. Recompute at most once per STATUS_TTL seconds; View ▸
+            # Refresh status forces it, as does a job finishing.
+            now = time.monotonic()
+            root = self._root_getter()
+            c = self._status_cache
+            if c is not None and c[1] == root and now - c[0] < self.STATUS_TTL:
+                stage_status = dict(c[2])
+            else:
+                ps = ProjectState(root)
+                for spec in STAGES:
+                    fn = spec.get("status")
+                    if not fn:
+                        continue
+                    try:
+                        ok, label = fn(ps)
+                        if ok:
+                            stage_status[spec["id"]] = (ok, label)
+                    except Exception:
+                        pass
+                self._status_cache = (now, root, dict(stage_status))
+        except Exception:
+            pass
+        # Cards the user hid (right-click ▸ Hide) are applied INSIDE canvas_layout so
+        # the remaining cards re-pack into contiguous columns (no gap). Not deleted —
+        # View ▸ Show hidden cards clears the set. Ghosts are never hidden (template).
+        hidden = set(store.get("hidden", []))
+        nodes, edges = canvas_layout(store, orphans, stage_status, hidden)
         index = {n["id"]: n for n in nodes}
 
         edge_pen = QPen(QColor("#4a4a4a"))
@@ -4048,6 +1641,7 @@ class JobCanvas(QWidget):
 
         for n in nodes:
             self._add_card(n)
+        self._place_gpu_panel()      # stays pinned top-right across repaints
 
         # RUNNING banner — a trunk run (▶ Run) has no card of its own, so without
         # this there'd be NO on-canvas sign that anything is live.
@@ -4071,10 +1665,18 @@ class JobCanvas(QWidget):
         self.view.verticalScrollBar().setValue(vb)
 
     def _add_card(self, n):
-        fill, border = _CARD_STYLE.get(n["status"], _CARD_STYLE["ghost"])
         ghost = n["is_ghost"]
         orphan = n.get("is_orphan", False)
-        running = (n["status"] == "running")
+        # Running if this node's own job is live, OR a trunk run (▶ Run — it has no
+        # card of its own) is executing this stage, so the stage's card lights up too.
+        # Light up ONLY the card that is actually running. The stage_id fallback
+        # exists for TRUNK runs (▶ Run), which have no job record — but it must hit
+        # the stage's ghost/template card, never every sibling job of that stage
+        # (that lit all four Extract cards amber at once).
+        act = self._active or {}
+        running = card_is_running(n, act)
+        fill, border = _CARD_STYLE.get("running" if running else n["status"],
+                                       _CARD_STYLE["ghost"])
         item = _CardItem(n, self)
         item.setBrush(QBrush(QColor(fill)))
         pen = QPen(QColor(border))
@@ -4084,31 +1686,38 @@ class JobCanvas(QWidget):
         item.setPen(pen)
         self.scene.addItem(item)
 
-        def text(s, x, y, pt, colour, bold=False):
-            t = QGraphicsSimpleTextItem(s, item)
-            t.setBrush(QColor(colour))
+        def text(s, x, y, pt, colour, bold=False, maxw=None):
             f = QFont()
             f.setPointSize(pt)
             f.setBold(bold)
+            if maxw is not None:                       # keep text inside the card
+                s = QFontMetrics(f).elidedText(s, Qt.TextElideMode.ElideRight, int(maxw))
+            t = QGraphicsSimpleTextItem(s, item)
+            t.setBrush(QColor(colour))
             t.setFont(f)
             t.setPos(x, y)
             return t
 
+        inner_w = n["w"] - 22                           # text column width (11px margins)
         # group tag (tiny) · friendly title (bold) · raw command · status/summary
-        text(n.get("group", ""), 11, 6, 8, "#6f6f6f")
+        text(n.get("group", ""), 11, 6, 8, "#6f6f6f", maxw=inner_w)
         text(n.get("title", n["label"]), 11, 20, 11,
-             "#8a8a8a" if ghost else "#ececec", bold=True)
-        text(n["stage_id"], 11, 40, 8, "#6f6f6f")     # raw command, for power users
-        if ghost:
-            sub = "not built"
-        elif running:
-            prog = (self._active.get("progress", "")
-                    if self._active.get("job_id") == n.get("id") else "")
+             "#8a8a8a" if ghost else "#ececec", bold=True, maxw=inner_w)
+        text(n.get("subtitle", n["stage_id"]), 11, 40, 8, "#6f6f6f", maxw=inner_w)
+        if running:
+            prog = act.get("progress", "")
             sub = "▶ running" + (f" · {prog}" if prog else "")
+        elif n.get("on_disk"):                 # completed outside the app (on disk)
+            sub = "✓ done (on disk)" + (
+                f" · {n['disk_label']}" if n.get("disk_label") else "")
+        elif ghost:
+            sub = "not built"
         else:
             st = summary_text(n["summary"])
             sub = n["status"] + (f" · {st}" if st else "")
-        text(sub[:36], 11, 56, 9, "#f0a92a" if running else "#7d7d7d")
+        text(sub, 11, 56, 9,
+             "#f0a92a" if running else ("#27ae60" if n.get("on_disk") else "#7d7d7d"),
+             maxw=inner_w)
         if not ghost and not orphan:
             text(n["id"], n["w"] - 42, 6, 8, "#9ec5ff")
 
@@ -4142,6 +1751,10 @@ class JobCanvas(QWidget):
 # Main window
 # ===========================================================================
 class Tomogration(QMainWindow):
+    # Seconds a disk-discovery result stays fresh. The canvas repaints every few
+    # seconds while a job runs; without this it would rescan ceph each time.
+    DISCOVERY_TTL = 60
+
     def __init__(self, project_root):
         super().__init__()
         self.project_root = project_root
@@ -4154,7 +1767,8 @@ class Tomogration(QMainWindow):
         self.runner.line.connect(self._log)
         self.runner.finished.connect(self._on_finished)
 
-        self.queue = []          # list of (label, command, stage_id)
+        # (the queue is no longer an in-memory list — it lives in the job store
+        #  as jobs with status='queued'; see queued_jobs())
         self.current = None      # active stage form state
         # Persisted per-stage parameter edits: {stage_id: {param_name: value}}. A user's
         # edits stick (across stage switches AND restarts) until they change them again,
@@ -4169,6 +1783,9 @@ class Tomogration(QMainWindow):
         _ep = self._param_store.get("ts_export_particles")
         if isinstance(_ep, dict) and _ep.get("relion_format") == "":
             _ep["relion_format"] = "--3d"
+        # One-shot: set to a stage id by _load_job_params so the next _select_stage
+        # shows a past run's values VERBATIM, with the dynamic defaults suppressed.
+        self._exact_params_for = None
         # Debounce disk writes: a single-shot timer flushes _param_store to config
         # ~0.6s after the last edit (so typing doesn't hammer the JSON).
         self._persist_timer = QTimer(self)
@@ -4178,6 +1795,15 @@ class Tomogration(QMainWindow):
         # Periodically re-scan for on-disk pick sets made outside the app (direct
         # terminal use); only redraw the canvas when the set actually changes.
         self._last_orphan_keys = None
+        self._orphan_cache = None        # (monotonic_ts, root, [orphans])
+        # A 'running' job cannot survive the process that launched it — clear any
+        # left over from a crash/force-quit, or the queue thinks it is still busy.
+        try:
+            stale = reconcile_running(root)
+            if stale:
+                self._stale_jobs = stale
+        except Exception:
+            pass
         self._discovery_timer = QTimer(self)
         self._discovery_timer.setInterval(45000)
         self._discovery_timer.timeout.connect(self._maybe_rediscover)
@@ -4192,6 +1818,7 @@ class Tomogration(QMainWindow):
         self._active_stage = None
         self._active_cmd = ""
         self._active_job_id = None    # set while a card-view job (not a stage) runs
+        self._m_resolution = None     # MCore's final 'name: N Å', caught in _log
         self._pending_parent = {}     # stage_id -> chosen parent job for the next build
         self._failed_file = None
         self._attempt = 1
@@ -4262,13 +1889,19 @@ class Tomogration(QMainWindow):
             self._panel("canvasCard", "Workflow graph", self.canvas))
         self._build_align_and_command()   # sets self.align_list_card + self.command_card
         self.details_card = self._panel("detailsCard", "Job details",
-                                        self._build_details_panel())
+                                        self._build_details_panel(),
+                                        on_close=self._hide_details)
         self.dir_card = self._panel("dirCard", "Directory overview",
                                     self._build_directory_overview())
         self.terminal_card = self._panel("rightCard", "Terminal",
                                           self._build_terminal_panel())
         self.queue_card = self._panel("queueCard", "Jobs queue",
                                       self._build_queue_panel())
+        # Floor width for the right-hand column so the horizontal splitter can never
+        # squeeze the command box / terminal narrow enough to truncate the command
+        # text (looked broken; wrapped text needs room). Users can still widen it.
+        for _c in (self.command_card, self.terminal_card):
+            _c.setMinimumWidth(400)
         # Stash keeps panels parented (and hidden) while they're not in the live
         # layout — a parentless shown QWidget would pop up as its own window.
         self._stash = QWidget()
@@ -4319,6 +1952,8 @@ class Tomogration(QMainWindow):
         self._act_canvas.setCheckable(True)
         view.addSeparator()
         view.addAction("Refresh status", self._refresh_status_dots)
+        view.addAction("Show hidden cards", self._show_hidden_cards)
+        view.addAction("Found on disk…", self._open_orphan_drawer)
         view.addAction("Tilt-series groups…", self._open_groups)
 
     # ---- card canvas (Phase 2) ----
@@ -4436,6 +2071,96 @@ class Tomogration(QMainWindow):
         lab.setStyleSheet("color:#9ec5ff;font-size:11px;font-weight:700;margin-top:6px;")
         return lab
 
+    def _hide_details(self):
+        """Close the Job details pane (the ✕ in its header) and give the space back to
+        the canvas — it is revealed by 'Details' and otherwise had no way to dismiss it."""
+        self.details_card.setVisible(False)
+        if getattr(self, "_canvas_split", None) is not None:
+            self._canvas_split.setSizes([max(self._canvas_split.width(), 900), 0])
+
+    def _bridge_job_outputs(self, job_id, stage_id):
+        """Wrapper stages write to a path from their params, not into jobs/<id>/ — which
+        left the job folder empty and the trail cold. Drop a symlink
+        jobs/<id>/outputs -> <real dir> (plus a one-line WHERE_ARE_THE_OUTPUTS.txt for
+        anyone browsing over ceph/SMB where symlinks may not resolve). Never overwrites
+        real files; failures are logged, not raised."""
+        real = self._job_output_dirs(job_id, stage_id)
+        if not real:
+            return
+        jobdir = Path(self.project_root) / job_output_dir(job_id)
+        try:
+            jobdir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+        for i, rel in enumerate(real):
+            link = jobdir / ("outputs" if i == 0 else f"outputs_{i + 1}")
+            target = (Path(self.project_root) / rel).resolve()
+            try:
+                if link.is_symlink():
+                    link.unlink()          # refresh a stale link from a previous run
+                elif link.exists():
+                    continue               # a real file/dir is there — leave it alone
+                link.symlink_to(target)
+            except OSError as e:
+                self._log(f"{job_id}: could not link outputs -> {rel} ({e})", "warning")
+        try:
+            (jobdir / "WHERE_ARE_THE_OUTPUTS.txt").write_text(
+                f"This step writes its results to:\n"
+                + "".join(f"    {r}/\n" for r in real)
+                + f"(relative to the project root {self.project_root})\n"
+                  f"The 'outputs' symlink here points at the first of these.\n")
+        except OSError:
+            pass
+        self._log(f"{job_id}: outputs are in {', '.join(real)} "
+                  f"(linked as jobs/{job_id}/outputs).", "info")
+
+    def _count_dir_entries(self, rel, cap=3):
+        """How many entries a project-relative dir holds (capped — ceph scandir is slow
+        and we only need 'empty or not'). 0 for a missing dir, or before a project root
+        is set (the details pane can be built before one exists)."""
+        root = getattr(self, "project_root", None)
+        if not isinstance(root, (str, os.PathLike)) or not rel:
+            return 0
+        try:
+            p = Path(root) / rel
+            if not p.is_dir():
+                return 0
+            return sum(1 for _ in itertools.islice(p.iterdir(), cap))
+        except (OSError, TypeError, ValueError):
+            return 0
+
+    def _job_output_dirs(self, job_id, stage_id):
+        """Where a job's files REALLY land, project-relative. Most WarpTools stages write
+        into jobs/<id>/, but wrapper stages take their destination from their own params
+        (relion4_convert/class3d -> project_dir, the converters -> out_dir, export ->
+        output_processing). Returns the existing ones, de-duplicated, so the details pane
+        can point at real files instead of an empty job folder."""
+        spec = self._stage_by_id(stage_id) or {}
+        keys = spec.get("output_params") or []
+        root = getattr(self, "project_root", None)
+        if not keys or not isinstance(root, (str, os.PathLike)):
+            return []
+        try:
+            job = load_jobs(root).get("jobs", {}).get(job_id) or {}
+        except Exception:
+            return []
+        params = job.get("params", {}) or {}
+        out, seen = [], set()
+        for k in keys:
+            rel = str(params.get(k, "") or "").strip()
+            if not rel:
+                continue
+            if os.path.isabs(rel):                    # make it project-relative if we can
+                try:
+                    rel = os.path.relpath(rel, self.project_root)
+                except ValueError:
+                    pass
+            rel = rel.rstrip("/")
+            if rel and rel not in seen and (Path(self.project_root) / rel).is_dir():
+                seen.add(rel)
+                out.append(rel)
+        return out
+
     def _open_dir_button(self, label, rel):
         b = QPushButton(label)
         b.setStyleSheet("text-align:left;padding:3px 8px;")
@@ -4495,10 +2220,13 @@ class Tomogration(QMainWindow):
                 self._canvas_split.setSizes([int(w * 0.55), int(w * 0.45)])
             return
 
+        # crYOLO / re-extract cards borrow the ts_template_match stage but must not
+        # display that id — show their own subtitle instead.
+        disp = node.get("subtitle") or stage_id
         if node.get("is_ghost"):
             meta = f"{node.get('group', '')} · {stage_id} · not built yet"
         else:
-            meta = f"{node.get('group', '')} · {stage_id} · {node.get('status', '')}  ({node.get('id')})"
+            meta = f"{node.get('group', '')} · {disp} · {node.get('status', '')}  ({node.get('id')})"
         ml = QLabel(meta)
         ml.setStyleSheet("color:#9a9a9a;font-size:11px;")
         ml.setWordWrap(True)
@@ -4519,9 +2247,27 @@ class Tomogration(QMainWindow):
                 self._add_pattern_hint("searches", DIR_FILE_HINTS.get(rel))
         self.details_box.addWidget(self._details_heading("OUTPUTS"))
         if not node.get("is_ghost") and node.get("id"):
-            outrel = f"jobs/{node['id']}"      # a real job writes into its own jobs/<id>
-            self.details_box.addWidget(self._open_dir_button(f"📂  {outrel}", outrel))
-            self._add_pattern_hint("writes", DIR_FILE_HINTS.get(outs[0]) if outs else None)
+            # WHERE THE FILES ACTUALLY ARE. Only WarpTools job stages write into
+            # jobs/<id>/; wrapper stages (relion4_*, aretomo, miss-alignment) write to a
+            # path given in their own params, which used to leave the details pane
+            # pointing at an empty jobs/<id> folder. List the real destinations first.
+            real = self._job_output_dirs(node["id"], stage_id)
+            for rel in real:
+                self.details_box.addWidget(self._open_dir_button(f"📂  {rel}", rel))
+                self._add_pattern_hint("writes", DIR_FILE_HINTS.get(rel))
+            outrel = f"jobs/{node['id']}"
+            n_here = self._count_dir_entries(outrel)
+            if n_here or not real:
+                self.details_box.addWidget(self._open_dir_button(f"📂  {outrel}", outrel))
+                if not real:
+                    self._add_pattern_hint("writes",
+                                           DIR_FILE_HINTS.get(outs[0]) if outs else None)
+            else:
+                note = QLabel(f"    (job folder {outrel}/ is empty — this step writes to "
+                              f"the path above, set in its parameters)")
+                note.setStyleSheet("color:#7c7c7c;font-size:10px;")
+                note.setWordWrap(True)
+                self.details_box.addWidget(note)
         else:
             for rel in outs:
                 self.details_box.addWidget(self._open_dir_button(f"📂  {rel}", rel))
@@ -4549,8 +2295,18 @@ class Tomogration(QMainWindow):
                 fork = QPushButton("⑂ Duplicate (fork)")
                 fork.clicked.connect(lambda _=False, j=jid: self._fork_job(j))
                 self.details_box.addWidget(fork)
+                # The stage-level "Open in job builder" below shows whatever you
+                # last edited, which after a few variants is nobody's run. This
+                # recovers THIS job's values.
+                load = QPushButton("⤓ Load this run's parameters into builder")
+                load.setToolTip("Fill the job builder with the parameters this job "
+                                "actually ran with, so you can inspect them or change "
+                                "one and re-run. Creates nothing on its own.")
+                load.clicked.connect(lambda _=False, j=jid: self._load_job_params(j))
+                self.details_box.addWidget(load)
             edit = QPushButton("Open in job builder →")
-            edit.setToolTip("Load this stage's parameters into the job builder on the right.")
+            edit.setToolTip("Open this STAGE in the job builder with your last-used "
+                            "values — not necessarily any particular run's.")
             edit.clicked.connect(lambda _=False, s=spec: self._select_stage(s))
             self.details_box.addWidget(edit)
             if stage_id in ("ts_template_match", "threshold_picks"):
@@ -4574,20 +2330,164 @@ class Tomogration(QMainWindow):
         vals.update(self._param_store.get(spec["id"], {}))
         return vals
 
+
+    # ---- Found-on-disk drawer -------------------------------------------------
+    def _open_orphan_drawer(self):
+        """Everything discovered on disk but not yet part of the project, in ONE
+        searchable list instead of a mile-wide row of cards on the canvas. With ~50
+        RELION jobs the canvas row was unreadable and forced a disk scan on every
+        repaint; this scans once when opened, and on demand."""
+        if not self.project_root:
+            QMessageBox.warning(self, "No project", "Open a project root first.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Found on disk")
+        dlg.resize(680, 520)
+        v = QVBoxLayout(dlg)
+
+        head = QLabel("Work found under the project root that is not yet a tracked "
+                      "job. Pick one, then choose what to do with it.")
+        head.setWordWrap(True)
+        head.setStyleSheet("color:#9a9a9a;font-size:11px;")
+        v.addWidget(head)
+
+        bar = QHBoxLayout()
+        search = QLineEdit()
+        search.setPlaceholderText("filter… (e.g. Select, Class3D, job009)")
+        bar.addWidget(search, 1)
+        rescan = QPushButton("Rescan")
+        bar.addWidget(rescan)
+        bw = QWidget()
+        bw.setLayout(bar)
+        v.addWidget(bw)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(3)
+        tree.setHeaderLabels(["Item", "Kind", "Location"])
+        tree.setRootIsDecorated(True)
+        v.addWidget(tree, 1)
+
+        info = QLabel("")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#c8b78a;font-size:11px;")
+        v.addWidget(info)
+
+        row = QHBoxLayout()
+        b_conv = QPushButton("→ RELION → Warp converter")
+        b_cls = QPushButton("→ Select good class")
+        b_adopt = QPushButton("✦ Adopt as job")
+        b_open = QPushButton("📂 Open folder")
+        for b in (b_conv, b_cls, b_adopt, b_open):
+            row.addWidget(b)
+        rw = QWidget()
+        rw.setLayout(row)
+        v.addWidget(rw)
+
+        state = {"items": []}
+
+        def selected():
+            it = tree.currentItem()
+            return it.data(0, Qt.UserRole) if it is not None else None
+
+        def repopulate(force=False):
+            tree.clear()
+            orphs = self._discover_orphans(force=force)
+            state["items"] = orphs
+            groups = {}
+            for o in orphs:
+                kind = ("RELION " + o.get("suffix", "").split("/")[0]
+                        if o.get("kind") == "relion_job" else "Pick set")
+                groups.setdefault(kind, []).append(o)
+            q = search.text().strip().lower()
+            shown = 0
+            for kind in sorted(groups):
+                parent = QTreeWidgetItem([kind, "", ""])
+                kids = 0
+                for o in groups[kind]:
+                    label = o.get("suffix", "?")
+                    loc = o.get("dir", "")
+                    if q and q not in f"{label} {loc} {kind}".lower():
+                        continue
+                    child = QTreeWidgetItem([label, kind, loc])
+                    child.setData(0, Qt.UserRole, o)
+                    parent.addChild(child)
+                    kids += 1
+                if kids:
+                    tree.addTopLevelItem(parent)
+                    parent.setExpanded(True)
+                    shown += kids
+            info.setText(f"{shown} shown · {len(orphs)} found on disk"
+                         + ("  (filtered)" if q else ""))
+            for i in range(3):
+                tree.resizeColumnToContents(i)
+
+        def act(fn, close=True):
+            o = selected()
+            if not o:
+                info.setText("Select an item first.")
+                return
+            fn(o)
+            if close:
+                dlg.accept()
+
+        search.textChanged.connect(lambda _t: repopulate(False))
+        rescan.clicked.connect(lambda: repopulate(True))
+        tree.itemDoubleClicked.connect(
+            lambda *_: act(self._open_relion_converter))
+        b_conv.clicked.connect(lambda: act(self._open_relion_converter))
+        b_cls.clicked.connect(lambda: act(self._open_relion_job))
+        b_adopt.clicked.connect(lambda: act(self._adopt_orphan))
+        b_open.clicked.connect(
+            lambda: act(lambda o: self._open_dir(o.get("dir", "")), close=False))
+        repopulate(True)
+        self._child_windows = getattr(self, "_child_windows", [])
+        self._child_windows.append(dlg)
+        dlg.show()
+
     # ---- orphan discovery + adoption ----
-    def _discover_orphans(self):
-        """On-disk pick sets made outside the app, for the canvas to surface."""
+    def _discover_orphans(self, force=False):
+        """On-disk work made outside the app: pick sets + finished RELION jobs.
+
+        CACHED. This touches the filesystem, and the canvas repaints every few
+        seconds while a job runs — rescanning ceph on every repaint is what made the
+        UI freeze for long stretches. The scan now happens at most once per
+        DISCOVERY_TTL seconds (or when something explicitly invalidates it); every
+        other caller gets the cached list, which costs nothing."""
+        now = time.monotonic()
+        cache = getattr(self, "_orphan_cache", None)
+        if (not force and cache is not None
+                and now - cache[0] < self.DISCOVERY_TTL
+                and cache[1] == self.project_root):
+            return cache[2]
+        out = []
         try:
-            return discover_picksets(self.project_root, load_jobs(self.project_root))
+            out += discover_picksets(self.project_root, load_jobs(self.project_root))
         except Exception:
-            return []
+            pass
+        try:
+            out += discover_relion_jobs(self.project_root)
+        except Exception:
+            pass
+        self._orphan_cache = (now, self.project_root, out)
+        return out
+
+    def _invalidate_status(self):
+        """Force the next canvas repaint to re-read per-stage on-disk status. A run
+        just changed the filesystem, so the cached sweep is stale."""
+        c = getattr(self, "canvas", None)
+        if c is not None:
+            c._status_cache = None
+
+    def _invalidate_orphans(self):
+        """Force the next discovery to hit disk (after adopting / deleting / a run)."""
+        self._orphan_cache = None
 
     def _maybe_rediscover(self):
         """Timer tick: refresh the canvas only if the found-on-disk set changed (and
         only in card view, to avoid churn while the user is in the list view)."""
         if getattr(self, "_view_mode", "lists") != "canvas":
             return
-        keys = {(o.get("dir"), o.get("suffix")) for o in self._discover_orphans()}
+        keys = {(o.get("dir"), o.get("suffix")) for o in self._discover_orphans(force=True)}
         if keys != self._last_orphan_keys:
             self._last_orphan_keys = keys
             self._refresh_canvas()
@@ -4616,11 +2516,70 @@ class Tomogration(QMainWindow):
         if getattr(self, "_view_mode", "lists") == "canvas" and self.runner.busy():
             self._refresh_canvas()
 
+    def _adopt_relion_job(self, orph):
+        """Adopt a finished RELION job (Refine3D / Class3D / Select) as a DAG node.
+
+        Adoption used to assume every orphan was a template-match pick set, so a
+        Refine3D result came back labelled "Template matching" with 0 series and no
+        way to build M from it. A RELION job is a different animal: nothing needs
+        linking (the files stay where RELION put them), and what downstream steps
+        actually need are its half maps and particle star. RELION's filenames differ
+        between a converged run (run_half1_class001_unfil.mrc) and a mid-iteration
+        one (run_itNNN_half1_class001_unfil.mrc), so LOOK rather than guess."""
+        rel = orph.get("dir", "")
+        d = Path(self.project_root) / rel
+        if not d.is_dir():
+            self._log(f"Adopt: RELION job folder gone: {rel}", "fail")
+            return
+
+        def newest(*patterns):
+            for pat in patterns:
+                hits = sorted(d.glob(pat))
+                if hits:
+                    return os.path.relpath(hits[-1], self.project_root)
+            return ""
+
+        jtype = str(orph.get("suffix", "")).split("/")[0] or "RELION"
+        params = {
+            "job_dir": rel,
+            "job_type": jtype,
+            "data_star": orph.get("star", ""),
+            "half1": newest("run_half1_class001_unfil.mrc",
+                            "run_it*_half1_class001_unfil.mrc", "*half1*unfil.mrc"),
+            "half2": newest("run_half2_class001_unfil.mrc",
+                            "run_it*_half2_class001_unfil.mrc", "*half2*unfil.mrc"),
+            "class_map": newest("run_class001.mrc", "run_it*_class001.mrc",
+                                "*_class001.mrc"),
+        }
+        job = new_job(self.project_root, "relion4_result",
+                      orph.get("suffix", "RELION job"), params, inputs={})
+        update_job(self.project_root, job["id"], status="completed", exit_code=0,
+                   tool="adopted", summary={},
+                   finished=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        found = [k for k in ("half1", "half2", "class_map", "data_star") if params[k]]
+        self._log(f"Adopted {orph.get('suffix', rel)} as {job['id']} "
+                  f"(found: {', '.join(found) or 'star only'}).", "ok")
+        if jtype == "Refine3D" and params["half1"] and params["half2"]:
+            self._log(f"  → right-click {job['id']} ▸ Build downstream ▸ "
+                      f"'M: create mask' then 'M: create species' — the half maps and "
+                      f"particle star are filled in for you.", "info")
+        elif not (params["half1"] and params["half2"]):
+            self._log(f"  note: no unfiltered half maps in {rel} — M's create-species "
+                      f"needs them, so this job can feed re-extraction but not M yet.",
+                      "warning")
+        self._invalidate_orphans()
+        self._refresh_canvas()
+
     def _adopt_orphan(self, orph):
         """Turn a found-on-disk pick set into a real (completed) job: symlink its
         STAR + corr/score files into jobs/J###/matching (non-destructive — the
         originals stay put), and record the job with its inferred params so it
-        wires into the DAG like any other. Symlinks (not copies) keep it cheap."""
+        wires into the DAG like any other. Symlinks (not copies) keep it cheap.
+
+        RELION jobs take a different path — they need no linking, and what matters is
+        their half maps / particle star (see _adopt_relion_job)."""
+        if orph.get("kind") == "relion_job":
+            return self._adopt_relion_job(orph)
         suffix = orph.get("suffix", "")
         src_rel = orph.get("dir", "")
         src = Path(self.project_root) / src_rel
@@ -4652,7 +2611,125 @@ class Tomogration(QMainWindow):
                    finished=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         self._log(f"Adopted pick set '{suffix}' from {src_rel} as {job['id']} "
                   f"({n} series linked into {job['output_dir']}/matching).", "ok")
+        self._invalidate_orphans()
         self._refresh_canvas()
+
+    def _open_relion_job(self, orph):
+        """A found-on-disk RELION job: load its star into the 'select good class'
+        builder so the user only types the good class number and picks MODE A/B. Use
+        this for a raw Class3D result (has class numbers). Reuses the same param-store
+        prefill as 'Build downstream' — no new job is created here."""
+        star = orph.get("star", "")
+        spec = self._stage_by_id("relion4_select_picks")
+        if not spec:
+            return
+        self._param_store.setdefault("relion4_select_picks", {})["class_star"] = star
+        self._persist_param_store()
+        self._select_stage(spec)
+        self._log(f"Loaded {star} into 'RELION 4: select good class'. Type the good "
+                  f"class number(s), choose MODE A or B, and dry-run first (EXECUTE off) "
+                  f"to see the class populations.", "ok")
+
+    def _open_relion_converter(self, orph):
+        """A found-on-disk RELION job: load its star into the 'RELION 4 → Warp
+        re-extract' builder to re-extract ALL its particles at a finer bin. Use this
+        for a Subset-selection output (good class, duplicates removed) — the star you
+        fed to Refine3D. Prefills particles_star; the user just picks MODE A/B."""
+        star = orph.get("star", "")
+        spec = self._stage_by_id("relion4_to_warp")
+        if not spec:
+            return
+        self._param_store.setdefault("relion4_to_warp", {})["particles_star"] = star
+        self._persist_param_store()
+        self._select_stage(spec)
+        self._log(f"Loaded {star} into 'RELION 4 → Warp: re-extract'. Choose MODE A or B "
+                  f"and dry-run first (EXECUTE off) to see how many particles matched.", "ok")
+
+    def _register_reextract_pickset(self, values):
+        """After a successful RELION→Warp re-extract (relion4_to_warp /
+        relion4_select_picks with EXECUTE on), register the pick stars it wrote as a
+        COMPLETED pick-set card — shaped like an adopted template-match set (crYOLO-
+        style) so right-click ▸ Build downstream ▸ ts_export_particles wires straight
+        to it. Stamps the source RELION star so its 'found on disk' card turns green
+        (used). No-op on a dry run or if no pick stars were written."""
+        out_rel = str(values.get("out_dir", "")).strip()
+        source = str(values.get("particles_star") or values.get("class_star") or "").strip()
+        if not out_rel or not self.project_root:
+            return
+        root = Path(self.project_root)
+        out_dir = root / out_rel
+        if not out_dir.is_dir():
+            return
+        stars = sorted(itertools.islice(out_dir.glob("Position*Apx*.star"), 0, 20000))
+        angpix = suffix = None
+        for s in stars:
+            m = _PICK_STAR_RE.match(s.name)
+            if m:
+                _, angpix, suffix = m.groups()
+                break
+        if not stars or suffix is None:
+            return                      # dry run / unexpected naming — nothing to register
+        src_tag = "/".join(source.split("/")[-3:-1]) if "/" in source else source  # Select/job009
+        # Promote the source RELION selection into a real (green) job node FIRST, so it
+        # leaves the found-on-disk orphan chain and the re-extract card can wire to it.
+        sel_id = self._ensure_selection_job(source, src_tag)
+        params = {"override_suffix": suffix, "tomo_angpix": angpix, "source_star": source}
+        label = f"re-extract picks ({src_tag})" if src_tag else "re-extract picks"
+        inputs = {"selection": sel_id} if sel_id else {}
+        job = new_job(self.project_root, "ts_template_match", label, params, inputs)
+        dst = root / job["output_dir"] / "matching"
+        try:
+            dst.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self._log(f"Re-extract card: cannot make {dst}: {e}", "fail")
+            delete_job(self.project_root, job["id"])
+            return
+        n = 0
+        for s in stars:
+            n += self._symlink_into(s, dst)
+        update_job(self.project_root, job["id"], status="completed", exit_code=0,
+                   tool="reextract", orphan_suffix=suffix, summary={"series": n},
+                   finished=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        self._log(f"Re-extract pick set ({src_tag or 'RELION'}) → {job['id']} "
+                  f"({n} tomograms linked). Right-click it ▸ Build downstream ▸ "
+                  f"ts_export_particles to extract at the finer bin (set output_angpix + "
+                  f"box; keep --normalized_coords ON).", "ok")
+        self._refresh_canvas()
+
+    def _ensure_selection_job(self, source, src_tag):
+        """Get (or create) the tracked job node that represents a consumed RELION
+        selection, so its 'found on disk' card is promoted into the green job tree.
+        Reused across re-runs (keyed on source_star) so a star never spawns duplicates.
+        Shaped as a ts_template_match job (Pick row = the green section) with
+        tool='relion_selection' so the canvas titles it 'RELION selection' and its menu
+        offers no bogus downstream. Returns the job id (or None if it can't be made)."""
+        if not source:
+            return None
+        store = load_jobs(self.project_root)
+        for jid, j in (store.get("jobs", {}) or {}).items():
+            if j.get("tool") == "relion_selection" and \
+                    str((j.get("params") or {}).get("source_star")) == source:
+                return jid
+        try:
+            job = new_job(self.project_root, "ts_template_match",
+                          src_tag or "RELION selection",
+                          {"source_star": source}, inputs={})
+            update_job(self.project_root, job["id"], tool="relion_selection",
+                       status="completed", exit_code=0, summary={},
+                       finished=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            return job["id"]
+        except Exception:
+            return None
+
+    def _maybe_register_reextract(self, values, code):
+        """Fire _register_reextract_pickset only on a successful EXECUTE run. Guarded so
+        a dry run or a failure never spawns a card. Never raises into the run loop."""
+        if code != 0 or not values or not values.get("execute"):
+            return
+        try:
+            self._register_reextract_pickset(values)
+        except Exception as e:
+            self._log(f"Re-extract card registration failed: {e}", "fail")
 
     @staticmethod
     def _symlink_into(src_file, dst_dir):
@@ -4742,8 +2819,9 @@ class Tomogration(QMainWindow):
             return
 
         # 4. mark completed — now it wires into the DAG like any adopted pick set.
+        #    tool="cryolo" so the canvas titles it as crYOLO, not 'Template matching'.
         update_job(self.project_root, job["id"], status="completed", exit_code=0,
-                   orphan_suffix=f"_{tag}", summary={"series": n},
+                   tool="cryolo", orphan_suffix=f"_{tag}", summary={"series": n},
                    finished=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         self._log(f"crYOLO picks '{tag}' → {job['id']} ({n} tomograms) in "
                   f"{job['output_dir']}/matching.", "ok")
@@ -4759,21 +2837,46 @@ class Tomogration(QMainWindow):
         menu = QMenu(self)
         sid = node.get("stage_id")
         if node.get("is_orphan"):
-            menu.addAction("Adopt as job",
-                           lambda: self._adopt_orphan(node.get("orphan", {})))
-            menu.addAction("View picks (warp-tm-vis)",
-                           lambda: self._view_picks_tm_vis(node))
+            orph = node.get("orphan", {})
+            if orph.get("kind") == "relion_job":
+                menu.addAction("Open in RELION → Warp converter (re-extract all)",
+                               lambda: self._open_relion_converter(orph))
+                menu.addAction("Open in select good class (filter by class)",
+                               lambda: self._open_relion_job(orph))
+            else:
+                menu.addAction("Adopt as job", lambda: self._adopt_orphan(orph))
+                menu.addAction("View picks (warp-tm-vis)",
+                               lambda: self._view_picks_tm_vis(node))
             menu.addAction("Details", lambda: self._show_card_details(node))
+            menu.addSeparator()
+            menu.addAction("Hide (remove from view)", lambda: self._hide_card(node))
+            menu.addAction("Delete folder from disk…",
+                           lambda: self._delete_orphan_dir(orph))
             menu.exec(global_pos)
             return
         if node.get("is_ghost"):
             menu.addAction("Build & run job", lambda: self._build_job(sid, run=True))
+            menu.addAction("＋ Queue this job", lambda: self._queue_stage(sid))
             menu.addAction("Build (don't run)", lambda: self._build_job(sid, run=False))
             menu.addAction("Open in job builder", lambda: self._canvas_pick(sid))
         else:
             jid = node.get("id")
+            status = node.get("status", "")
+            if status == "running":
+                menu.addAction("■ Kill (stop this job)", lambda: self._kill_job(jid))
+                menu.addSeparator()
+            elif status == "queued":
+                menu.addAction("▶ Run now (jump the queue)",
+                               lambda: self._run_queued_job(jid))
+                menu.addAction("✕ Remove from queue", lambda: self._delete_job(jid))
+                menu.addSeparator()
+            else:
+                # Failed or finished: requeue is the CryoSPARC-style 'try it again'.
+                menu.addAction("↻ Restart (queue again)", lambda: self._requeue_job(jid))
             menu.addAction("Run / re-run", lambda: self._run_job(jid))
-            children = DOWNSTREAM.get(sid, [])
+            # A promoted RELION selection rides ts_template_match but has no picks of
+            # its own — don't offer threshold/export downstream from it.
+            children = [] if node.get("title") == "RELION selection" else DOWNSTREAM.get(sid, [])
             if children:
                 sub = menu.addMenu("Build downstream from this")
                 for ch in children:
@@ -4781,9 +2884,14 @@ class Tomogration(QMainWindow):
                                   lambda _=False, c=ch: self._build_downstream(jid, c))
             menu.addAction("Duplicate (fork)", lambda: self._fork_job(jid))
             menu.addAction("Details", lambda: self._show_card_details(node))
+            menu.addAction("⤓ Load this run's parameters into builder",
+                           lambda: self._load_job_params(jid))
             menu.addAction("Open in job builder", lambda: self._canvas_pick(sid))
             menu.addSeparator()
-            menu.addAction("Delete job", lambda: self._delete_job(jid))
+            menu.addAction("Hide (remove from view)", lambda: self._hide_card(node))
+            menu.addAction("Delete job (keep files)", lambda: self._delete_job(jid))
+            menu.addAction("⚠ Delete job AND its files…",
+                           lambda: self._delete_job_permanent(jid))
         menu.exec(global_pos)
 
     def _build_job(self, stage_id, params=None, run=True, parent=None):
@@ -4804,6 +2912,8 @@ class Tomogration(QMainWindow):
             # newest-upstream default
             parent = self._pending_parent.pop(stage_id, None) or default_parent_for(stage_id, store)
         inputs = {"processing": parent} if parent else {}
+        if not self._confirm_overwrite(spec, params):
+            return None
         job = new_job(self.project_root, stage_id, spec.get("label", stage_id),
                       params, inputs)
         self._log(f"Built {job['id']} · {job['label']}"
@@ -4812,6 +2922,36 @@ class Tomogration(QMainWindow):
         if run:
             self._run_job(job["id"])
         return job
+
+    def _confirm_overwrite(self, spec, params):
+        """If this step's declared output dir already holds files, say so and ask.
+
+        Wrapper stages write to a path from their own params (output_processing,
+        out_dir, project_dir), so a re-run silently writes over the last result.
+        Warp/RELION won't warn — the first sign is mixed-up output. Returns True to
+        proceed. Only ever LOOKS; nothing is deleted here."""
+        keys = spec.get("output_params") or []
+        root = getattr(self, "project_root", None)
+        if not keys or not isinstance(root, (str, os.PathLike)):
+            return True
+        hits = []
+        for k in keys:
+            rel = str((params or {}).get(k, "") or "").strip().rstrip("/")
+            if not rel:
+                continue
+            n = self._count_dir_entries(rel, cap=2)
+            if n:
+                hits.append(rel)
+        if not hits:
+            return True
+        where = "\n".join(f"    {h}/" for h in hits)
+        return QMessageBox.question(
+            self, "Output folder is not empty",
+            f"{spec.get('label', spec['id'])} writes into:\n\n{where}\n\n"
+            f"There are already files there. Re-running will write over results "
+            f"with the same names (anything with a different name is left alone).\n\n"
+            f"Continue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes
 
     def _build_downstream(self, parent_id, child_stage_id):
         """Set up the next stage wired to a SPECIFIC parent job: derive the fiddly
@@ -4836,6 +2976,63 @@ class Tomogration(QMainWindow):
         self._log(f"Set up {stage_title(child_stage_id, child_stage_id)} from "
                   f"{parent_id}.{hint}  Adjust, then ▶ Build & run as job.", "ok")
 
+    def _load_job_params(self, job_id):
+        """Populate the job builder with the parameters a past job actually ran with.
+
+        Every job record keeps the params it was built from, but until now the only
+        way back to them was to read the card's details and retype. That matters
+        most for M, where you run MCore a dozen times with one flag different and
+        the useful question is always "what exactly did the good one use?".
+
+        This does NOT create a job — it fills the builder so you can inspect the
+        values, tweak one, and then Run / Build & run / Queue. Fork if you want a
+        new card straight away.
+        """
+        store = load_jobs(self.project_root)
+        job = store.get("jobs", {}).get(job_id)
+        if not job:
+            self._log(f"{job_id}: no such job.", "warn")
+            return
+        stage_id = job.get("stage_id", "")
+        spec = self._stage_by_id(stage_id)
+        if not spec:
+            self._log(f"{job_id}: its stage '{stage_id}' no longer exists in this "
+                      f"version of tomogration, so its parameters cannot be loaded "
+                      f"into the builder. The command it ran is on the card.", "warn")
+            return
+
+        # Keep only params the stage still declares. A stage that gained or lost a
+        # parameter since the run would otherwise inject a key the form cannot show
+        # (invisible, but still passed to build_command) — so drop those and say so.
+        kept, dropped, missing = params_for_builder(spec, job.get("params", {}))
+
+        self._param_store[spec["id"]] = kept
+        self._persist_param_store()
+        self._exact_params_for = spec["id"]      # suppress dynamic defaults, once
+        self._select_stage(spec)
+
+        note = f"Loaded {job_id}'s parameters into the job builder ({len(kept)} values)."
+        if dropped:
+            note += (f"  Ignored {len(dropped)} parameter(s) this stage no longer has: "
+                     f"{', '.join(dropped)}.")
+        if missing:
+            note += (f"  {len(missing)} newer parameter(s) fell back to defaults: "
+                     f"{', '.join(missing)}.")
+        self._log(note, "ok")
+
+        # The builder rebuilds the command from the controls. If that does not
+        # reproduce what the job actually ran, the difference is the interesting
+        # part — surface it rather than letting a silently different command run.
+        try:
+            rebuilt = (self.current or {}).get("cmd")
+            rebuilt = rebuilt.toPlainText().strip() if rebuilt is not None else ""
+        except (AttributeError, RuntimeError):
+            rebuilt = ""
+        ran = (job.get("command", "") or "").strip()
+        if ran and rebuilt and " ".join(ran.split()) != " ".join(rebuilt.split()):
+            self._log(f"Note: the rebuilt command differs from what {job_id} ran. "
+                      f"It ran:\n    {ran}", "info")
+
     def _fork_job(self, job_id):
         """Duplicate a job (same stage, params and input wiring) as a new queued
         job, and open it in the builder so its params can be tweaked before Run."""
@@ -4846,15 +3043,35 @@ class Tomogration(QMainWindow):
         job = new_job(self.project_root, src["stage_id"],
                       src.get("label", src["stage_id"]) + " (fork)",
                       src.get("params", {}), src.get("inputs", {}))
-        self._log(f"Forked {job_id} → {job['id']}. Edit params in the job builder, "
-                  f"then right-click → Run.", "ok")
-        self._refresh_canvas()
+        # CARRY THE COMMAND ACROSS. A fork used to copy only the params, so the new
+        # card had no command and every attempt to run or queue it reported "J## has
+        # no command — delete it and re-queue". Prefer rebuilding from the params
+        # (picks up the new job's own id/paths); fall back to the source's literal
+        # command for trunk-style script stages that build_job_command can't model.
+        cmd = ""
         spec = self._stage_by_id(src["stage_id"])
+        if spec:
+            try:
+                store2 = load_jobs(self.project_root)
+                cmd = build_job_command(spec, store2["jobs"][job["id"]], store2,
+                                        self.warp_launch, self._group_inputs)
+            except Exception:
+                cmd = ""
+        if not cmd:
+            cmd = src.get("command", "") or ""
+        if cmd:
+            update_job(self.project_root, job["id"], command=cmd)
+        self._log(f"Forked {job_id} → {job['id']}"
+                  + ("" if cmd else "  (no command could be derived — open it in the "
+                                    "job builder and press ↻ Rebuild from controls)")
+                  + (". Edit params in the job builder, then right-click → Run."
+                     if cmd else ""), "ok")
+        self._refresh_canvas()
         if spec:
             self._select_stage(spec)
 
-    def _delete_job(self, job_id):
-        if QMessageBox.question(
+    def _delete_job(self, job_id, confirm=True):
+        if confirm and QMessageBox.question(
                 self, "Delete job?",
                 f"Remove job {job_id} from the workflow?\n\n"
                 f"Its output folder (jobs/{job_id}/) is left on disk — delete that "
@@ -4863,6 +3080,220 @@ class Tomogration(QMainWindow):
         if delete_job(self.project_root, job_id):
             self._log(f"Deleted job {job_id}.", "info")
             self._refresh_canvas()
+
+    def _queue_stage(self, stage_id):
+        """Queue a stage straight from its card, without running it now.
+
+        The ghost-card menu only offered "Build & run" and "Build (don't run)", so
+        the only way to line work up was the job builder's + Queue variant button —
+        there was no way to queue the NEXT step while something was already running,
+        which is exactly when you want to. Builds the job, resolves its command now
+        (so what you queued is what runs) and parks it as status='queued'."""
+        spec = self._stage_by_id(stage_id)
+        if not spec:
+            return
+        job = self._build_job(stage_id, run=False)
+        if not job:
+            return                      # cancelled at the overwrite prompt
+        store = load_jobs(self.project_root)
+        try:
+            cmd = build_job_command(spec, store["jobs"][job["id"]], store,
+                                    self.warp_launch, self._group_inputs)
+        except Exception as e:
+            self._log(f"Could not build a command for {job['id']}: {e}", "fail")
+            delete_job(self.project_root, job["id"])
+            return
+        update_job(self.project_root, job["id"], status="queued", command=cmd)
+        n = len(queued_jobs(load_jobs(self.project_root)))
+        self._log(f"{job['id']} · {stage_title(stage_id, stage_id)} queued "
+                  f"(position {n}). It starts when the queue reaches it — "
+                  f"right-click ▸ Run now to jump ahead.", "ok")
+        self._refresh_queue()
+        self._refresh_canvas()
+
+    def _requeue_job(self, job_id):
+        """Put a finished/failed job back in the waiting list, unchanged. This is the
+        'it died, run it again' path — the record (and its card) is reused rather than
+        cloned, so the canvas doesn't accumulate a copy per attempt. Its resolved
+        command is kept; edit it in the job builder first if you want a variant."""
+        store = load_jobs(self.project_root)
+        job = (store.get("jobs", {}) or {}).get(job_id)
+        if not job:
+            return
+        if job.get("status") == "running":
+            self._log(f"{job_id} is running — kill it first.", "fail")
+            return
+        update_job(self.project_root, job_id, status="queued", exit_code=None,
+                   finished=None, started=None)
+        self._log(f"{job_id} re-queued. It runs when the queue reaches it "
+                  f"(right-click ▸ Run now to jump ahead).", "ok")
+        self._refresh_queue()
+        self._refresh_canvas()
+
+    def _kill_job(self, job_id):
+        """Stop the running job. The runner is shared, so this is the same terminate
+        the TERMINATE button does — routed through the card for discoverability."""
+        if getattr(self, "_active_job_id", None) != job_id or not self.runner.busy():
+            self._log(f"{job_id} is not the running job.", "info")
+            return
+        if QMessageBox.question(
+                self, "Kill job?",
+                f"Stop {job_id}? Partial output stays on disk.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        self._log(f"killing {job_id}…", "warning")
+        self.runner.terminate()
+
+    def _delete_job_permanent(self, job_id):
+        """Delete the job record AND its output files. Irreversible.
+
+        The plain delete keeps everything on disk, which is right most of the time —
+        but it leaves failed attempts cluttering the project. This removes the files
+        too. It is deliberately paranoid: it resolves the targets with
+        job_delete_targets (which refuses raw-data and shared directories), SHOWS the
+        exact list with sizes, defaults to No, and never touches anything it did not
+        name."""
+        store = load_jobs(self.project_root)
+        job = (store.get("jobs", {}) or {}).get(job_id)
+        if not job:
+            return
+        if job.get("status") == "running":
+            QMessageBox.warning(self, "Job is running",
+                                f"{job_id} is still running — kill it first.")
+            return
+        spec = self._stage_by_id(job.get("stage_id")) or {}
+        targets, skipped = job_delete_targets(
+            self.project_root, job_id, job.get("stage_id"),
+            job.get("params", {}), spec.get("output_params"))
+
+        if not targets:
+            if QMessageBox.question(
+                    self, "Nothing on disk",
+                    f"{job_id} has no deletable files (its outputs are shared or "
+                    f"protected).\n\nRemove the job from the workflow anyway?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+                self._delete_job(job_id, confirm=False)
+            return
+
+        lines = []
+        for rel in targets:
+            lines.append(f"    {rel}/   ({self._dir_size_human(rel)})")
+        detail = "\n".join(lines)
+        note = ("\n\nNOT touched (protected or shared):\n    "
+                + "\n    ".join(skipped)) if skipped else ""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Delete job and its files?")
+        box.setText(f"PERMANENTLY delete {job_id} · {job.get('label', '')}?")
+        box.setInformativeText(
+            f"These folders will be REMOVED FROM DISK — this cannot be undone:\n\n"
+            f"{detail}{note}")
+        yes = box.addButton("Delete permanently", QMessageBox.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(box.buttons()[-1])
+        box.exec()
+        if box.clickedButton() is not yes:
+            return
+
+        removed = []
+        for rel in targets:
+            try:
+                shutil.rmtree(Path(self.project_root) / rel)
+                removed.append(rel)
+            except OSError as e:
+                self._log(f"could not delete {rel}: {e}", "fail")
+        delete_job(self.project_root, job_id)
+        self._log(f"Permanently deleted {job_id} and {len(removed)} folder(s): "
+                  f"{', '.join(removed)}", "warning")
+        self._invalidate_orphans()
+        self._invalidate_status()
+        self._refresh_queue()
+        self._refresh_canvas()
+
+    def _dir_size_human(self, rel):
+        """Rough size of a project-relative dir, capped so ceph is never walked deep."""
+        total = n = 0
+        try:
+            for dp, _dn, fn in os.walk(Path(self.project_root) / rel):
+                for f in fn:
+                    try:
+                        total += os.path.getsize(os.path.join(dp, f))
+                    except OSError:
+                        pass
+                    n += 1
+                    if n > 20000:
+                        return f"{total / 1e9:.1f}+ GB"
+        except OSError:
+            return "?"
+        for unit, div in (("GB", 1e9), ("MB", 1e6), ("kB", 1e3)):
+            if total >= div:
+                return f"{total / div:.1f} {unit}"
+        return f"{total} B"
+
+    def _hide_card(self, node):
+        """Remove a card from the canvas without deleting anything on disk. The hidden
+        set lives in the job store (per-project); View ▸ Show hidden cards restores
+        them all. Handy for clearing failed/finished jobs and stale RELION orphans."""
+        nid = node.get("id")
+        if not nid:
+            return
+        try:
+            store = load_jobs(self.project_root)
+            hidden = set(store.get("hidden", []))
+            hidden.add(nid)
+            store["hidden"] = sorted(hidden)
+            save_jobs(self.project_root, store)
+        except Exception as e:
+            self._log(f"Hide failed: {e}", "fail")
+            return
+        self._log(f"Hid '{node.get('title', nid)}'. View ▸ Show hidden cards to "
+                  f"bring it back.", "info")
+        self._refresh_canvas()
+
+    def _show_hidden_cards(self):
+        """View ▸ Show hidden cards: clear the hidden set so everything reappears."""
+        try:
+            store = load_jobs(self.project_root)
+            n = len(store.get("hidden", []))
+            if not n:
+                self._log("No hidden cards.", "info")
+                return
+            store["hidden"] = []
+            save_jobs(self.project_root, store)
+        except Exception as e:
+            self._log(f"Show hidden failed: {e}", "fail")
+            return
+        self._log(f"Restored {n} hidden card(s).", "ok")
+        self._refresh_canvas()
+
+    def _delete_orphan_dir(self, orph):
+        """HARD-DELETE a found-on-disk RELION job folder (right-click ▸ Delete folder).
+        Confirms first, naming the exact path — this recursively removes the directory
+        and cannot be undone. Only ever targets the discovered dir under the project."""
+        rel = orph.get("dir", "")
+        if not rel:
+            return
+        d = Path(self.project_root) / rel
+        if not d.is_dir():
+            self._log(f"Delete: folder already gone: {rel}", "info")
+            self._refresh_canvas()
+            return
+        if QMessageBox.question(
+                self, "Delete folder from disk?",
+                f"HARD-DELETE this folder and everything inside it?\n\n{d}\n\n"
+                f"This removes the RELION job from disk and cannot be undone. "
+                f"(To just clear it from the view instead, use Hide.)",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        try:
+            shutil.rmtree(d)
+        except OSError as e:
+            self._log(f"Delete failed: {e}", "fail")
+            QMessageBox.critical(self, "Delete failed", str(e))
+            return
+        self._log(f"Hard-deleted {rel}.", "info")
+        self._invalidate_orphans()
+        self._refresh_canvas()
 
     # ---- helpers ----
     @staticmethod
@@ -4881,8 +3312,10 @@ class Tomogration(QMainWindow):
                 pass
         return {}
 
-    def _panel(self, object_name, title, content):
-        """Wrap a panel's content in a bordered card with a header bar."""
+    def _panel(self, object_name, title, content, on_close=None):
+        """Wrap a panel's content in a bordered card with a header bar. `on_close` adds
+        an ✕ button on the right of the header (for panels that are revealed on demand
+        and would otherwise have no way to dismiss them)."""
         frame = QFrame()
         frame.setObjectName(object_name)
         frame.setProperty("card", "true")
@@ -4892,7 +3325,22 @@ class Tomogration(QMainWindow):
         header = QLabel(title)
         header.setStyleSheet("font-size:13px;font-weight:700;color:#e6e6e6;"
                              "padding-bottom:6px;border-bottom:1px solid #3a3a3a;")
-        lay.addWidget(header)
+        if on_close is None:
+            lay.addWidget(header)
+        else:
+            bar = QHBoxLayout()
+            bar.setContentsMargins(0, 0, 0, 0)
+            bar.setSpacing(6)
+            bar.addWidget(header, 1)
+            x = QPushButton("✕")
+            x.setFixedSize(22, 22)
+            x.setToolTip("Close this panel")
+            x.setStyleSheet("border:none;color:#9a9a9a;font-size:13px;font-weight:700;")
+            x.clicked.connect(on_close)
+            bar.addWidget(x, 0, Qt.AlignTop)
+            bw = QWidget()
+            bw.setLayout(bar)
+            lay.addWidget(bw)
         lay.addWidget(content, 1)
         return frame
 
@@ -5191,12 +3639,15 @@ class Tomogration(QMainWindow):
         return w
 
     def _cancel_queue(self):
-        if not self.queue:
+        """Delete every waiting job. Running jobs are untouched (use TERMINATE)."""
+        pend = queued_jobs(load_jobs(self.project_root))
+        if not pend:
             return
-        n = len(self.queue)
-        self.queue = []
+        for j in pend:
+            delete_job(self.project_root, j["id"])
         self._refresh_queue()
-        self._log(f"Cleared {n} queued job(s).", "info")
+        self._refresh_canvas()
+        self._log(f"Cleared {len(pend)} queued job(s).", "info")
 
     def _select_stage(self, spec):
         # Highlight the active stage so selection is visible.
@@ -5286,6 +3737,15 @@ class Tomogration(QMainWindow):
             if d and not os.path.isabs(d):
                 overrides[pname] = str(self.project.root / d)
 
+        # "Load this run's parameters" must reproduce a past job EXACTLY. Every
+        # override above is a convenience for a NEW run (next AreTomo version,
+        # newest alignments folder, detected gain) and would silently replace the
+        # value the job actually used — the one thing you are looking at it for.
+        # One-shot, cleared here so the next visit behaves normally.
+        if self._exact_params_for == spec["id"]:
+            overrides = {}
+        self._exact_params_for = None
+
         # Effective value per param: a fresh DYNAMIC default (new-version-available)
         # wins; else the user's persisted edit; else the static template default.
         stored = self._param_store.get(spec["id"], {})
@@ -5309,7 +3769,7 @@ class Tomogration(QMainWindow):
         self.form_box.addWidget(cmd_lbl)
         self.form_box.addWidget(cmd)
 
-        btns = QHBoxLayout()
+        btns = FlowLayout(spacing=6)   # wraps to extra rows when the panel is narrow
         run = QPushButton("▶ Run")
         build_job = QPushButton("▶ Build & run as job")
         build_job.setToolTip("Card view: create a job instance on the canvas from these "
@@ -5320,12 +3780,14 @@ class Tomogration(QMainWindow):
         reset = QPushButton("⟲ Reset defaults")
         reset.setToolTip("Discard your saved edits for THIS step and restore the "
                          "template defaults (and current dynamic defaults).")
-        for b in (run, build_job, rebuild, enqueue, reset):
-            btns.addWidget(b)
+        buttons = [run, build_job, rebuild, enqueue, reset]
         if spec.get("sync_helper"):
             fill = QPushButton("Fill: deselect all unaligned")
             fill.clicked.connect(self._fill_sync_command)
-            btns.addWidget(fill)
+            buttons.append(fill)
+        for b in buttons:
+            b.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            btns.addWidget(b)
         bw = QWidget()
         bw.setLayout(btns)
         self.form_box.addWidget(bw)
@@ -5663,6 +4125,21 @@ class Tomogration(QMainWindow):
     def _update_warning(self):
         spec = self.current["spec"]
         msg = spec["validate"](self._values()) if spec.get("validate") else ""
+        # An unresolved {placeholder} means a field points at another field that is
+        # still empty. If it reaches the tool it is used LITERALLY — that is how
+        # MTools ended up creating a population file named "{name}.population".
+        # Checked for EVERY stage, so no future default can reintroduce this.
+        try:
+            cmd = self.current["cmd"].toPlainText()
+        except Exception:
+            cmd = ""
+        left = sorted(set(re.findall(r"\{(\w+)\}", cmd)) - {"jobid"})
+        if left:
+            names = ", ".join("{" + k + "}" for k in left)
+            warn = (f"⚠ Unresolved placeholder{'s' if len(left) > 1 else ''} {names} "
+                    f"— fill in the field(s) they refer to. Run as-is and the tool "
+                    f"will treat it as a literal name and create the wrong file.")
+            msg = warn + ("\n" + msg if msg else "")
         self.current["warn"].setText(msg)
 
     def _fill_sync_command(self):
@@ -5721,6 +4198,11 @@ class Tomogration(QMainWindow):
             self._prepare_rename_run()
         if spec.get("normalize_exclusions"):
             self._normalize_exclusions()
+        # A trunk (▶ Run) re-extract has no job record — stash its values so
+        # _on_finished can register the output pick-set card on success.
+        self._pending_reextract = (
+            dict(self._values())
+            if spec["id"] in ("relion4_to_warp", "relion4_select_picks") else None)
         self._dispatch(spec["id"], cmd, fresh=True)
 
     def _coarse_alignment_gate(self):
@@ -5841,10 +4323,17 @@ class Tomogration(QMainWindow):
             self._prepare_rename_run()
         if spec.get("normalize_exclusions"):
             self._normalize_exclusions()
-        label = f'{spec["id"]} v{len(self.queue) + 1}'
-        self.queue.append((label, cmd, spec["id"]))
-        self._log(f"queued: {label}", "info")
+        # Queueing creates a REAL job (status='queued') carrying its resolved command,
+        # so it shows on the canvas as a card and survives a restart.
+        n = len(queued_jobs(load_jobs(self.project_root))) + 1
+        job = new_job(self.project_root, spec["id"],
+                      f'{stage_title(spec["id"], spec["id"])} (queued {n})',
+                      self._values(), inputs={})
+        update_job(self.project_root, job["id"], status="queued", command=cmd,
+                   trunk=True)
+        self._log(f"queued: {job['id']} · {spec['label']}", "info")
         self._refresh_queue()
+        self._refresh_canvas()
 
     def _dispatch(self, stage_id, cmd, fresh=True):
         if self.runner.busy():
@@ -5857,6 +4346,7 @@ class Tomogration(QMainWindow):
         self._active_stage = stage_id
         self._active_cmd = cmd
         self._active_job_id = None      # this is a three-column stage run, not a job
+        self._set_status(f"\u25b6 {stage_title(stage_id, stage_id)} \u2014 starting\u2026")
         self.node_buttons[stage_id].setStyleSheet(DOT_ORANGE)
         self.runner.run(cmd, self.project_root)
 
@@ -5940,11 +4430,13 @@ class Tomogration(QMainWindow):
                    exit_code=None, finished=None,
                    started=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         self._active_job_id = job_id
+        self._m_resolution = None
         self._active_stage = None
         self._active_cmd = cmd
         self._attempt = 1
         self._failed_file = None
         self._log(f"--- running {job_id} · {spec['label']} ---", "info")
+        self._set_status(f"▶ {job_id} · {spec['label']} — starting…")
         self._refresh_canvas()          # flip the card to 'running' immediately
         self.runner.run(cmd, self.project_root)
 
@@ -5960,11 +4452,25 @@ class Tomogration(QMainWindow):
         status = "completed" if code == 0 else "failed"
         summary = summarize_job(job["stage_id"],
                                 Path(self.project_root) / job["output_dir"])
+        # M writes no summary file, so its result only exists as the line _log
+        # caught. Consume it here (and clear it, so the next job cannot inherit
+        # the previous run's number).
+        res = getattr(self, "_m_resolution", None)
+        self._m_resolution = None
+        if res is not None and code == 0:
+            summary["resolution_A"] = f"{res:g}"
         update_job(self.project_root, job_id, status=status, exit_code=code,
                    finished=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                    summary=summary)
         self._log(f"--- {job_id} {status} (exit {code}) ---",
                   "ok" if code == 0 else "fail")
+        self._set_status(
+            f"{'\u2713' if code == 0 else '\u2717'} {job_id} {status} (exit {code})")
+        if code == 0:
+            self._bridge_job_outputs(job_id, job.get("stage_id"))
+        # A re-extract run as a job: register its output pick-set card too.
+        if job.get("stage_id") in ("relion4_to_warp", "relion4_select_picks"):
+            self._maybe_register_reextract(job.get("params", {}), code)
         if hasattr(self, "_refresh_canvas"):     # Phase 2 hook; harmless until then
             self._refresh_canvas()
 
@@ -6022,13 +4528,14 @@ class Tomogration(QMainWindow):
         # no stage dots / history / auto-recovery). A queued STAGE run may still
         # start afterwards, so fall through to the chaining block below.
         if getattr(self, "_active_job_id", None):
-            self._finalize_job(code)
+            self._finalize_job(code)          # records status + repaints the canvas
+            # _run_queued_job sets BOTH markers, so clear both or the stage's ghost
+            # card stays lit after the job finishes.
+            self._active_stage = None
+            self._active_cmd = ""
+            self._run_progress = ""
             self._refresh_status_dots()
-            if self.queue and not self.runner.busy():
-                label, cmd, sid = self.queue.pop(0)
-                self._log(f"--- running {label} ---", "info")
-                self._refresh_queue()
-                self._dispatch(sid, cmd, fresh=True)
+            self._run_queue()          # chain the next queued job, if any
             return
 
         stage_id = self._active_stage
@@ -6047,6 +4554,9 @@ class Tomogration(QMainWindow):
                 self._dispatch(stage_id, self._active_cmd, fresh=False)
                 return
 
+        self._set_status(
+            f"{'\u2713' if code == 0 else '\u2717'} "
+            f"{stage_title(stage_id, stage_id or 'run')} finished (exit {code})")
         dot = self.node_buttons.get(stage_id)
         if dot and code != 0:
             dot.setStyleSheet(DOT_RED)
@@ -6058,11 +4568,25 @@ class Tomogration(QMainWindow):
             self._history_index = None
         self._refresh_status_dots()
 
-        if self.queue and not self.runner.busy():
-            label, cmd, sid = self.queue.pop(0)
-            self._log(f"--- running {label} ---", "info")
-            self._refresh_queue()
-            self._dispatch(sid, cmd, fresh=True)
+        # Trunk re-extract just finished — register its output pick-set card (crYOLO-
+        # style) so it wires into ts_export_particles. Cleared regardless.
+        pr = getattr(self, "_pending_reextract", None)
+        self._pending_reextract = None
+        if pr is not None:
+            self._maybe_register_reextract(pr, code)
+
+        # A trunk run has no job record, so its "running" look lives entirely in
+        # self._active_stage. Clear it and REPAINT — otherwise the stage's ghost card
+        # keeps the amber it had at the last repaint and looks stuck mid-run forever
+        # (the job path repaints via _finalize_job; this path never did).
+        self._active_stage = None
+        self._active_cmd = ""
+        self._run_progress = ""
+        if hasattr(self, "_invalidate_status"):
+            self._invalidate_status()   # the run just changed what's on disk
+        self._refresh_canvas()
+
+        self._run_queue()              # chain the next queued job, if any
 
     def _recover_failed_file(self, path, spec):
         basename = os.path.basename(path)
@@ -6368,12 +4892,51 @@ class Tomogration(QMainWindow):
     # ---- RIGHT: terminal + queue ----
     def _build_terminal_panel(self):
         v = QVBoxLayout()
+        v.setSpacing(4)
+
+        # ---- STATUS STRIP: progress lives HERE, not in the log ----------------
+        # WarpTools emits "N/M …" continuously. Collapsing those in the log stream
+        # only worked while nothing else printed: any interleaved line (a queue
+        # message) reset the collapse and left a trail of 1/52, 2/52, 3/52 through
+        # the scrollback. Progress is STATE, not history — so it gets its own strip
+        # that overwrites in place, and the log keeps only real output (which makes
+        # it worth selecting and copying from).
+        self.status_strip = QLabel("idle")
+        self.status_strip.setStyleSheet(
+            "background:#181818;border:1px solid #333;border-radius:4px;"
+            "padding:5px 8px;color:#9a9a9a;font-size:11px;")
+        self.status_strip.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        v.addWidget(self.status_strip)
+        self.status_bar_w = QProgressBar()
+        self.status_bar_w.setTextVisible(False)
+        self.status_bar_w.setFixedHeight(4)
+        self.status_bar_w.setRange(0, 100)
+        self.status_bar_w.setValue(0)
+        self.status_bar_w.setStyleSheet(
+            "QProgressBar{background:#181818;border:none;border-radius:2px;}"
+            "QProgressBar::chunk{background:#f0a92a;border-radius:2px;}")
+        self.status_bar_w.setVisible(False)
+        v.addWidget(self.status_bar_w)
+
         bar = QHBoxLayout()
+        bar.setSpacing(6)
         bar.addWidget(QLabel("Log"))
+        bar.addStretch(1)
+        find = QLineEdit()
+        find.setPlaceholderText("find…")
+        find.setFixedWidth(120)
+        find.returnPressed.connect(lambda: self._term_find(find.text()))
+        bar.addWidget(find)
+        copy_btn = QPushButton("Copy")
+        copy_btn.setToolTip("Copy the selection, or the whole log if nothing is selected")
+        copy_btn.clicked.connect(self._term_copy)
+        bar.addWidget(copy_btn)
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(lambda: self.term.clear())
+        bar.addWidget(clear_btn)
         term_btn = QPushButton("TERMINATE")
         term_btn.setStyleSheet("color:#c0392b;")
         term_btn.clicked.connect(self.runner.terminate)
-        bar.addStretch(1)
         bar.addWidget(term_btn)
         barw = QWidget()
         barw.setLayout(bar)
@@ -6381,40 +4944,218 @@ class Tomogration(QMainWindow):
 
         self.term = QPlainTextEdit()
         self.term.setReadOnly(True)
-        self.term.setMaximumBlockCount(5000)
+        self.term.setMaximumBlockCount(20000)
+        self.term.setTextInteractionFlags(Qt.TextSelectableByMouse
+                                          | Qt.TextSelectableByKeyboard)
         self.term.setStyleSheet(
-            f"background:#111;color:#ddd;font-family:{MONO};font-size:12px;")
+            f"background:#111;color:#ddd;font-family:{MONO};font-size:12px;"
+            f"selection-background-color:#2d4a6b;")
         v.addWidget(self.term, 1)
+
+        # ---- COMMAND INPUT: quick checks without leaving the app --------------
+        # Runs in the project root on its OWN process, so it never collides with a
+        # running job. Meant for `<tool> --help`, ls, head, the check scripts.
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        prompt = QLabel("❯")
+        prompt.setStyleSheet("color:#7fb4ff;font-weight:700;")
+        row.addWidget(prompt)
+        self.cmd_input = QLineEdit()
+        self.cmd_input.setPlaceholderText(
+            "run a command in the project root (↑/↓ history) — e.g. nvidia-smi, "
+            "WarpTools ts_ctf --help")
+        self.cmd_input.setStyleSheet(f"font-family:{MONO};font-size:12px;")
+        self.cmd_input.returnPressed.connect(self._run_console_cmd)
+        self.cmd_input.installEventFilter(self)          # ↑/↓ history
+        row.addWidget(self.cmd_input, 1)
+        roww = QWidget()
+        roww.setLayout(row)
+        v.addWidget(roww)
+        self._console_hist = []
+        self._console_pos = 0
 
         w = QWidget()
         w.setLayout(v)
         return w
 
+    # ---- status strip -------------------------------------------------------
+    def _set_status(self, text, progress=None):
+        """Update the strip above the log. `progress` = (done, total) or None."""
+        if not getattr(self, "status_strip", None):
+            return
+        self.status_strip.setText(text)
+        bar = getattr(self, "status_bar_w", None)
+        if bar is None:
+            return
+        if progress and progress[1]:
+            bar.setValue(max(0, min(100, int(100 * progress[0] / progress[1]))))
+            bar.setVisible(True)
+        else:
+            bar.setVisible(False)
+
+    def _term_copy(self):
+        cur = self.term.textCursor()
+        QApplication.clipboard().setText(
+            cur.selectedText().replace(" ", "\n") if cur.hasSelection()
+            else self.term.toPlainText())
+        self._log("Copied log to clipboard.", "info")
+
+    def _term_find(self, text):
+        if not text:
+            return
+        if not self.term.find(text):                 # wrap to the top and retry
+            cur = self.term.textCursor()
+            cur.movePosition(QTextCursor.Start)
+            self.term.setTextCursor(cur)
+            if not self.term.find(text):
+                self._log(f"'{text}' not found in the log.", "info")
+
+    # ---- console command input ---------------------------------------------
+    def _run_console_cmd(self):
+        cmd = self.cmd_input.text().strip()
+        if not cmd:
+            return
+        root = getattr(self, "project_root", None)
+        if not isinstance(root, (str, os.PathLike)):
+            self._log("Set a project root first.", "fail")
+            return
+        self._console_hist.append(cmd)
+        self._console_pos = len(self._console_hist)
+        self.cmd_input.clear()
+        self._log(f"❯ {cmd}", "info")
+        proc = QProcess(self)
+        proc.setWorkingDirectory(str(root))
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(
+            lambda p=proc: self._console_out(p))
+        proc.finished.connect(lambda code, _s, p=proc: self._console_done(p, code))
+        self._console_procs = getattr(self, "_console_procs", [])
+        self._console_procs.append(proc)             # keep a ref (GC would kill it)
+        proc.start("bash", ["-lc", cmd])
+
+    def _console_out(self, proc):
+        data = bytes(proc.readAllStandardOutput()).decode("utf-8", "replace")
+        for line in data.splitlines():
+            self._log(line, "out")
+
+    def _console_done(self, proc, code):
+        self._log(f"❯ exit {code}", "ok" if code == 0 else "fail")
+        try:
+            self._console_procs.remove(proc)
+        except (ValueError, AttributeError):
+            pass
+
+    def eventFilter(self, obj, ev):
+        """↑/↓ recall previous console commands."""
+        if (obj is getattr(self, "cmd_input", None)
+                and ev.type() == QEvent.KeyPress and self._console_hist):
+            key = ev.key()
+            if key in (Qt.Key_Up, Qt.Key_Down):
+                self._console_pos += -1 if key == Qt.Key_Up else 1
+                self._console_pos = max(0, min(len(self._console_hist),
+                                               self._console_pos))
+                self.cmd_input.setText(
+                    self._console_hist[self._console_pos]
+                    if self._console_pos < len(self._console_hist) else "")
+                return True
+        return super().eventFilter(obj, ev)
+
     def _run_queue(self):
-        if self.queue and not self.runner.busy():
-            label, cmd, sid = self.queue.pop(0)
-            self._log(f"--- running {label} ---", "info")
-            self._refresh_queue()
-            self._dispatch(sid, cmd, fresh=True)
+        """Start the next queued job (if nothing is running)."""
+        if self.runner.busy():
+            return
+        nxt = queued_jobs(load_jobs(self.project_root))
+        if nxt:
+            self._run_queued_job(nxt[0]["id"])
+
+    def _run_queued_job(self, job_id):
+        """Run a QUEUED job: its command was resolved when it was queued, so it runs
+        verbatim (no rebuild/re-wiring — what you queued is what runs). Tracked as a
+        job so _finalize_job records the outcome and the card turns green/red."""
+        store = load_jobs(self.project_root)
+        job = (store.get("jobs", {}) or {}).get(job_id)
+        if not job:
+            self._log(f"queued job {job_id} not found.", "fail")
+            return
+        cmd = job.get("command") or ""
+        if not cmd:
+            self._log(f"{job_id} has no command — delete it and re-queue.", "fail")
+            update_job(self.project_root, job_id, status="failed", exit_code=-1)
+            self._refresh_canvas()
+            return
+        update_job(self.project_root, job_id, status="running", exit_code=None,
+                   finished=None,
+                   started=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        self._active_job_id = job_id
+        self._m_resolution = None
+        self._active_stage = job.get("stage_id")   # keep the stage dot live too
+        self._active_cmd = cmd
+        self._attempt = 1
+        self._failed_file = None
+        self._log(f"--- running {job_id} · "
+                  f"{stage_title(job.get('stage_id', ''), job.get('stage_id', ''))} ---",
+                  "info")
+        self._refresh_queue()
+        self._refresh_canvas()
+        self.runner.run(cmd, self.project_root)
 
     def _refresh_queue(self):
+        """Render the waiting list straight from the job store (the single source of
+        truth). Safe before a project root exists."""
+        if not getattr(self, "queue_view", None):
+            return
+        root = getattr(self, "project_root", None)
+        if not isinstance(root, (str, os.PathLike)):
+            self.queue_view.setPlainText("(empty)")
+            return
+        try:
+            pend = queued_jobs(load_jobs(root))
+        except Exception:
+            pend = []
         self.queue_view.setPlainText(
-            "\n".join(f"• {l}" for l, _, _ in self.queue) or "(empty)")
+            "\n".join(f"{i + 1}. {j['id']}  {stage_title(j.get('stage_id', ''), '')}"
+                      for i, j in enumerate(pend)) or "(empty)")
 
     def _log(self, text, level):
         # Tap the stream for auto-recovery's failed-file detection.
         m = _FAILED_FILE_RE.search(text)
         if m:
             self._failed_file = m.group(1)
+        # MCore reports what a refinement achieved on ONE stdout line at the end and
+        # writes it nowhere. Catch it here so _finalize_job can put it on the card —
+        # otherwise a column of M jobs is unreadable and the only way to compare
+        # rounds is to scroll back through the log.
+        if level == "out" and getattr(self, "_active_job_id", None):
+            res = m_resolution(text)
+            if res is not None:
+                self._m_resolution = res
         colours = {"out": "#dddddd", "err": "#e0a850", "info": "#7fb4ff",
                    "ok": "#27ae60", "success": "#27ae60", "warning": "#e0a850",
                    "error": "#e24b4a", "fail": "#e24b4a"}
-        is_progress = level in ("out", "err") and bool(_PROGRESS_RE.match(text))
+        # Detect a self-updating progress line. The counter is NOT always first:
+        # MTools prints "Calculating data hashes... 285/290", which a start-
+        # anchored pattern misses — so all 290 ticks landed in the log as
+        # separate lines instead of the status strip.
+        is_progress = level in ("out", "err") and progress_key(text) is not None
         if is_progress:
-            # Latest "N/M …" line — surfaced live on the canvas's RUNNING banner.
-            self._run_progress = text.strip()[:40]
+            # Progress is STATE, not history: it goes to the status strip and NEVER
+            # into the log. That kills the 1/52 · 2/52 · 3/52 trail that appeared
+            # whenever another line interleaved, and keeps the log copy-worthy.
+            prog = text.strip()
+            self._run_progress = prog[:40]
+            m = _PROGRESS_RE.match(text)
+            done = total = None
+            nums = re.search(r"(\d+)\s*/\s*(\d+)", text)
+            if nums:
+                done, total = int(nums.group(1)), int(nums.group(2))
+            what = getattr(self, "_active_stage", None) or ""
+            label = stage_title(what, what) if what else "running"
+            self._set_status(f"▶ {label} — {prog}"[:160],
+                             (done, total) if total else None)
+            self._last_was_progress = True
+            return
         # WarpTools prints a blank spacer line between progress updates — swallow
-        # it so it doesn't break the in-place collapse below.
+        # it so the log doesn't collect blank gaps where progress used to be.
         if not text.strip() and self._last_was_progress:
             return
         safe = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -6424,17 +5165,10 @@ class Tomogration(QMainWindow):
         sb = self.term.verticalScrollBar()
         at_bottom = sb.value() >= sb.maximum() - 4
         prev = sb.value()
-        # Collapse WarpTools "N/M …" progress spam: keep ONE line that updates in
-        # place (via a local cursor — never touch the widget cursor/scroll).
-        if is_progress and self._last_was_progress:
-            cur = self.term.textCursor()
-            cur.movePosition(QTextCursor.End)
-            cur.movePosition(QTextCursor.StartOfBlock, QTextCursor.KeepAnchor)
-            cur.removeSelectedText()          # empty the last block
-            cur.insertHtml(html)              # replace it with the new progress line
-        else:
-            self.term.appendHtml(html)
-        self._last_was_progress = is_progress
+        self.term.appendHtml(html)
+        self._last_was_progress = False
+        # Follow the tail only if already at the bottom; if the user scrolled up to
+        # read or select, leave their position alone.
         sb.setValue(sb.maximum() if at_bottom else prev)
 
 
@@ -6501,6 +5235,29 @@ def apply_dark_theme(app):
     app.setPalette(p)
 
 
+
+def install_exception_surface(window):
+    """Route uncaught exceptions into the app's own log (and a dialog) instead of
+    stderr. Qt calls slots from C++, so a Python exception inside one is printed to
+    the terminal the app was launched from and then SWALLOWED — the UI just stops
+    responding to that button with no visible clue. Every 'I click Run and nothing
+    happens' bug in this app has had that shape."""
+    import traceback
+
+    def hook(exc_type, exc, tb):
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        try:
+            window._log("UNCAUGHT ERROR — please report this traceback:", "fail")
+            for line in text.rstrip().splitlines():
+                window._log("  " + line, "fail")
+            window._set_status(f"\u2717 error: {exc_type.__name__}: {exc}"[:160])
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = hook
+
+
 def main():
     app = QApplication(sys.argv)
     apply_dark_theme(app)
@@ -6522,6 +5279,7 @@ def main():
         print("No project selected.")
         return
     win = Tomogration(root)
+    install_exception_surface(win)   # errors land in the log, not stderr
     win.show()
     sys.exit(app.exec())
 

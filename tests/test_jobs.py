@@ -6,6 +6,7 @@ against a temp project dir. No Qt, no cluster, no data.
 
     python3 tests/test_jobs.py
 """
+import ast
 import sys
 import tempfile
 import importlib.util
@@ -186,6 +187,30 @@ check("corr suffix from path stem",
       app.template_corr_suffix({"template_path": "/a/b/ribo.mrc"}) == "_ribo")
 check("every stage has a friendly title",
       all(s["id"] in app.FRIENDLY_TITLES for s in app.STAGES))
+
+# A duplicated stage id draws TWO identical ghost cards on the canvas while every
+# lookup (_stage_by_id, status, docs) silently resolves to the first — so the second
+# card can never be reached. Two "M: reset project" cards shipped this way.
+_ids = [s["id"] for s in app.STAGES]
+_dupes = sorted({i for i in _ids if _ids.count(i) > 1})
+check(f"stage ids are unique{(' — DUPLICATED: ' + ', '.join(_dupes)) if _dupes else ''}",
+      not _dupes)
+
+# The same mistake in FRIENDLY_TITLES is INVISIBLE at runtime — a repeated key in a
+# dict literal just overwrites, so the map looks fine while one label is dead. Only
+# the source can reveal it.
+_src = ast.parse((REPO / "tomogration_jobs.py").read_text())
+_title_keys = []
+for _node in ast.walk(_src):
+    if (isinstance(_node, ast.Assign)
+            and any(getattr(t, "id", "") == "FRIENDLY_TITLES" for t in _node.targets)
+            and isinstance(_node.value, ast.Dict)):
+        _title_keys = [k.value for k in _node.value.keys
+                       if isinstance(k, ast.Constant)]
+_tdupes = sorted({k for k in _title_keys if _title_keys.count(k) > 1})
+check(f"FRIENDLY_TITLES has no repeated keys"
+      f"{(' — REPEATED: ' + ', '.join(_tdupes)) if _tdupes else ''}",
+      bool(_title_keys) and not _tdupes)
 
 # ---- canvas layout (Phase 2, pure) ----------------------------------------
 with tempfile.TemporaryDirectory() as tmp:
