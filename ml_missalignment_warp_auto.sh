@@ -243,6 +243,72 @@ EOF
     exit 2
 fi
 
+# ---------------------------------------------------------------------------
+# PATH SYNC — the caller (tomogration / your command line) is the SOURCE OF TRUTH.
+#
+# miss-alignment reads WHICH DATA to process from the YAML's general.data_directory
+# (infer) / general.training_directory (train), NOT from the input_dir we pass. So a
+# config copied from another project silently processes THAT project's data — you only
+# notice when the series count is wrong (e.g. "Preparing stacks 249/290" on a 72-series
+# project), and it will happily overwrite the OTHER dataset's .xml files.
+#
+# So: rewrite those keys in place to match what we were actually given. Comments and
+# formatting are preserved (targeted line edit, not a YAML re-dump), the original is
+# backed up once, and every change is logged loudly.
+_ABS_INPUT="$(cd "$INPUT_DIR" && pwd)"
+_ABS_MODEL=""
+[ -n "$MODEL_RUN_DIR" ] && [ -d "$MODEL_RUN_DIR" ] && _ABS_MODEL="$(cd "$MODEL_RUN_DIR" && pwd)"
+SYNC_MSG=$(python - "$CONFIG" "$MODE" "$_ABS_INPUT" "$_ABS_MODEL" <<'PYEOF' 2>/dev/null || true
+import sys, re, os, shutil, datetime
+cfg_path, mode, abs_input, abs_model = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    text = open(cfg_path, errors="replace").read()
+except OSError:
+    sys.exit(0)
+
+want = {}
+if mode == "infer":
+    want["data_directory"] = abs_input + "/"
+    if abs_model:
+        want["model_run_directory"] = abs_model + "/"
+else:
+    want["training_directory"] = abs_input + "/"
+
+changed, out = [], text
+for key, newval in want.items():
+    # key: <value>   [# trailing comment]   — replace only <value>
+    pat = re.compile(r'^(?P<i>[ \t]*)(?P<k>%s)[ \t]*:[ \t]*(?P<v>[^#\n]*?)[ \t]*(?P<c>#.*)?$'
+                     % re.escape(key), re.M)
+    m = pat.search(out)
+    if not m:
+        continue
+    old = (m.group("v") or "").strip()
+    if old.rstrip("/") == newval.rstrip("/"):
+        continue
+    rep = "%s%s: %s%s" % (m.group("i"), m.group("k"), newval,
+                          ("   " + m.group("c")) if m.group("c") else "")
+    out = out[:m.start()] + rep + out[m.end():]
+    changed.append("%s: %s  ->  %s" % (key, old or "(empty)", newval))
+
+if changed:
+    bak = "%s.bak_%s" % (cfg_path, datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+    shutil.copy2(cfg_path, bak)
+    open(cfg_path, "w").write(out)
+    print("BACKUP %s" % os.path.basename(bak))
+    for c in changed:
+        print(c)
+PYEOF
+)
+if [ -n "$SYNC_MSG" ]; then
+    echo "-------------------------------------------------------------------"
+    echo "CONFIG PATH SYNC — '$CONFIG' pointed somewhere else; corrected to match this job:"
+    while IFS= read -r line; do echo "   $line"; done <<< "$SYNC_MSG"
+    echo "   (the YAML decides which data is processed, so it must match input_dir)"
+    echo "-------------------------------------------------------------------"
+else
+    echo "config paths already match this job (data dir: $_ABS_INPUT)"
+fi
+
 # Pre-flight: catch a structurally broken config (missing/misplaced keys) HERE with a
 # clear message, instead of a deep KeyError traceback from inside miss-alignment. The
 # commonest break is hand-editing: dropping general.seed or putting iteration_settings
