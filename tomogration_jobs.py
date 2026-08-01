@@ -627,6 +627,53 @@ def versions_for_job(root, job, slack_s=900):
     return sorted(out)
 
 
+# Warp tools write into the PROCESSING FOLDER named inside the .settings file, not
+# next to it and not into jobs/<id>. No parameter spells it out, so ts_reconstruct
+# could only ever advertise an empty job folder while its tomograms went to
+# warp_tiltseries/reconstruction/.
+_PROC_PARAM_RE = re.compile(r'<Param\s+Name="([^"]+)"\s+Value="([^"]*)"', re.I)
+
+
+def settings_processing_dir(root, settings_rel):
+    """The processing folder a .settings file points at, project-relative, or "".
+
+    Reads it out of the XML when the key is recognisable, and otherwise falls back
+    to Warp's own naming convention (warp_tiltseries.settings -> warp_tiltseries/).
+    Only ever returns a directory that exists — guessing a path for a button that
+    opens folders is worse than returning nothing.
+    """
+    root = Path(root)
+    raw = str(settings_rel or "").strip()
+    if not raw:
+        return ""
+    p = Path(raw)
+    if not p.is_absolute():
+        p = root / p
+
+    def ok(value):
+        if not value:
+            return ""
+        d = Path(value)
+        if not d.is_absolute():
+            d = root / d
+        try:
+            return os.path.relpath(d, root) if d.is_dir() else ""
+        except ValueError:
+            return ""
+
+    try:
+        text = p.read_text(errors="replace")
+    except OSError:
+        text = ""
+    for name, value in _PROC_PARAM_RE.findall(text):
+        if "processing" in name.lower() and "folder" in name.lower():
+            rel = ok(value)
+            if rel:
+                return rel
+    # Convention: the settings' own stem names the processing folder.
+    return ok(p.stem)
+
+
 def job_real_outputs(root, job, spec):
     """Where this job's results are, as [(project_relative_dir, note)].
 
@@ -676,6 +723,20 @@ def job_real_outputs(root, job, spec):
             # Named but absent: a file M has not written yet, or a path typo.
             # Its parent is still the right place to look.
             add(os.path.dirname(rel), f"{p.name} is not there (yet)")
+
+    # Warp tools write into a named SUBFOLDER of the processing folder
+    # (reconstruction/, matching/, subtomo/ …). --output_processing overrides where
+    # that is, so honour it before falling back to the .settings file.
+    subdirs = spec.get("output_subdirs") or []
+    if subdirs:
+        proc = str(params.get("output_processing", "") or "").strip()
+        proc = (os.path.relpath(root / proc, root) if proc
+                else settings_processing_dir(
+                    root, params.get(spec.get("settings_param", "settings"), "")))
+        if proc:
+            for sub in subdirs:
+                add(f"{proc}/{sub}", "where the files actually land")
+            add(proc)
 
     # Some outputs cannot be derived from a parameter at all. MTools create_source
     # writes <name>.source into the PROCESSING folder named inside the .settings

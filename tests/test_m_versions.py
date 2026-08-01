@@ -387,5 +387,83 @@ with tempfile.TemporaryDirectory() as tmp:
     check("an unfilled {name} placeholder finds nothing",
           "warp_tiltseries" not in got and "." not in got)
 
+
+# ---- ts_reconstruct: tomograms are not in jobs/<id> either ------------------
+# They land in <processing folder>/reconstruction/, named inside the .settings
+# file. The pane used to say "Directory does not exist yet: .../jobs/J69" while a
+# 56-minute reconstruction sat in warp_tiltseries/reconstruction/.
+REC = next(s for s in st.STAGES if s["id"] == "ts_reconstruct")
+
+def warp_project(tmp, settings_body=None, proc="warp_tiltseries"):
+    root = Path(tmp)
+    (root / proc / "reconstruction").mkdir(parents=True)
+    (root / f"{proc}.settings").write_text(
+        settings_body if settings_body is not None
+        else f'<Settings><Param Name="ProcessingFolder" Value="{proc}" /></Settings>')
+    return root
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = warp_project(tmp)
+    job = {"id": "J69", "stage_id": "ts_reconstruct", "started": ago_ts(400),
+           "finished": ago_ts(250),
+           "params": {"settings": "warp_tiltseries.settings"}}
+    got = dict(jobs.job_real_outputs(root, job, REC))
+    check("ts_reconstruct finds reconstruction/",
+          "warp_tiltseries/reconstruction" in got)
+    check("and the processing folder itself", "warp_tiltseries" in got)
+    check("reconstruction/ is listed before its parent",
+          list(got).index("warp_tiltseries/reconstruction") == 0)
+
+with tempfile.TemporaryDirectory() as tmp:
+    # The XML key name varies between Warp versions, so the settings' own stem is
+    # the fallback. It must work even when nothing in the file is recognisable.
+    root = warp_project(tmp, settings_body='<Settings><Param Name="Wat" Value="x" /></Settings>')
+    job = {"id": "J69", "stage_id": "ts_reconstruct", "started": ago_ts(400),
+           "finished": ago_ts(250), "params": {"settings": "warp_tiltseries.settings"}}
+    got = dict(jobs.job_real_outputs(root, job, REC))
+    check("falls back to the settings stem as the processing folder",
+          "warp_tiltseries/reconstruction" in got)
+
+with tempfile.TemporaryDirectory() as tmp:
+    # --output_processing must win, or the pane points at the folder that was NOT
+    # written while the user believes their originals were spared.
+    root = warp_project(tmp)
+    (root / "warp_tiltseries_M" / "reconstruction").mkdir(parents=True)
+    job = {"id": "J70", "stage_id": "ts_reconstruct", "started": ago_ts(400),
+           "finished": ago_ts(250),
+           "params": {"settings": "warp_tiltseries.settings",
+                      "output_processing": "warp_tiltseries_M"}}
+    got = dict(jobs.job_real_outputs(root, job, REC))
+    check("--output_processing overrides the settings",
+          "warp_tiltseries_M/reconstruction" in got)
+    check("and the settings' own folder is not claimed",
+          "warp_tiltseries/reconstruction" not in got)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    (root / "warp_tiltseries.settings").write_text("<Settings/>")
+    job = {"id": "J69", "stage_id": "ts_reconstruct", "started": ago_ts(400),
+           "finished": ago_ts(250), "params": {"settings": "warp_tiltseries.settings"}}
+    check("no processing folder on disk -> claim nothing",
+          jobs.job_real_outputs(root, job, REC) == [])
+    check("a missing settings file is safe",
+          jobs.settings_processing_dir(root, "nope.settings") == "")
+    check("a blank settings param is safe",
+          jobs.settings_processing_dir(root, "") == "")
+
+# Overwriting is the expensive mistake: a reconstruction cannot be rebuilt once M
+# has changed the alignments it was made from. Warn unless a separate destination
+# was given.
+check("ts_reconstruct warns about replacing tomograms by default",
+      "REPLACES" in REC["validate"]({"perdevice": 1}))
+check("no warning once dont_overwrite is ticked",
+      REC["validate"]({"perdevice": 1, "dont_overwrite": True}) == "")
+check("the V100 deconv warning still wins",
+      "V100" in REC["validate"]({"perdevice": 2, "deconv": True}))
+# The stage must NOT declare its own --output_processing: job mode wires that
+# flag automatically, and a second one would be passed twice.
+check("ts_reconstruct does not duplicate the auto-wired output flag",
+      not any(p.get("flag") == "--output_processing" for p in REC["params"]))
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

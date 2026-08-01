@@ -737,11 +737,27 @@ STAGES = [
              "default": False, "help": "Deconvolve for visual contrast (not for STA)."},
             {"name": "dont_invert", "kind": "check", "flag": "--dont_invert",
              "default": True, "help": "Skip contrast inversion (dataset-specific)."},
+            {"name": "dont_overwrite", "kind": "check", "flag": "--dont_overwrite",
+             "default": False,
+             "help": "Skip tilt series that already have a tomogram instead of "
+             "rebuilding them. OFF means the tomograms already in "
+             "<processing>/reconstruction/ are REPLACED — and once M has changed the "
+             "alignments they were made from, they cannot be rebuilt. Turn ON to "
+             "resume an interrupted run, or to protect an existing set."},
         ],
+        # Tomograms land in <processing folder>/reconstruction/, which is named
+        # inside the .settings file, NOT in jobs/<id>. Without this the details pane
+        # reported an empty job folder and the files looked lost.
+        "settings_param": "settings",
+        "output_subdirs": ["reconstruction"],
         "validate": lambda v: (
             "⚠ perdevice > 1 with --deconv crashes on V100 (SIGABRT exit 134). "
             "Set perdevice 1 — or, if EML45 is NOT V100, re-test before overriding."
-            if v.get("perdevice", 1) > 1 and v.get("deconv") else ""),
+            if v.get("perdevice", 1) > 1 and v.get("deconv") else
+            "⚠ REPLACES the tomograms in <processing>/reconstruction/. Once M has "
+            "refined the alignments, the old ones cannot be rebuilt — tick "
+            "dont_overwrite, or run this as a job (jobs/<id>/ keeps them separate)."
+            if not v.get("dont_overwrite") else ""),
         "docs": {
             "what": "Back-projects aligned, CTF-corrected tilts into 3D tomograms.",
             "range": "angpix ~10 for viewable tomograms; perdevice 1-2; deconv off for averaging.",
