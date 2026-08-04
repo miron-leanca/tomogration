@@ -434,9 +434,17 @@ check("export reads the parent job's matching dir",
       exp_from_thr["input_directory"] == "jobs/J8/matching")
 check("export pattern from threshold",
       exp_from_thr["input_pattern"] == "*12.56Apx_v3-optimized_clean.star")
-check("export writes into a pick-set-named RELION dir",
-      exp_from_thr["output_processing"] == "relion4/v3-optimized"
-      and exp_from_thr["output_star"] == "relion4/v3-optimized/matching.star")
+# Named for the PICK SET so it is recognisable, and suffixed with {jobid} so two
+# exports of the same pick set never share a directory. Sharing one is what made
+# "clear this job" able to delete a DIFFERENT job's particles — the reason
+# clearing-and-re-running could not be offered safely at all.
+check("export writes into a pick-set-named, job-unique RELION dir",
+      exp_from_thr["output_processing"] == "relion4/v3-optimized_{jobid}"
+      and exp_from_thr["output_star"]
+      == "relion4/v3-optimized_{jobid}/matching.star")
+check("the star still sits inside the processing dir",
+      exp_from_thr["output_star"].startswith(
+          exp_from_thr["output_processing"] + "/"))
 check("_picktag strips angpix prefix", app._picktag("12.56Apx_v3-optimized") == "v3-optimized")
 check("_picktag from emd", app._picktag("10.00Apx_emd_70905") == "emd_70905")
 check("export dir falls back to trunk without a parent dir",

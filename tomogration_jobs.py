@@ -230,15 +230,44 @@ PROTECTED_DIRS = {
 }
 
 
-def job_delete_targets(root, job_id, stage_id, params, output_params=None):
-    """What a PERMANENT delete of this job would remove from disk.
+def declared_output_dirs(root, job):
+    """The project-relative directories a job's parameters say it writes to.
+
+    Resolves {jobid}, which build_job_command substitutes at run time — without
+    that, a job-scoped path like relion4/{jobid} matches nothing and the job looks
+    like it owns no output at all.
+    """
+    spec = next((s for s in STAGES if s["id"] == job.get("stage_id")), {})
+    out = set()
+    for key in spec.get("output_params") or []:
+        rel = str((job.get("params") or {}).get(key, "") or "").strip().rstrip("/")
+        if not rel:
+            continue
+        rel = rel.replace("{jobid}", str(job.get("id", "")))
+        if os.path.isabs(rel):
+            try:
+                rel = os.path.relpath(rel, Path(root))
+            except ValueError:
+                continue
+        out.add(rel)
+    return out
+
+
+def job_delete_targets(root, job_id, stage_id, params, output_params=None,
+                       store=None):
+    """What deleting or clearing this job would remove from disk.
 
     Returns (targets, skipped): both lists of project-relative paths. `targets` is
     what may be deleted; `skipped` is what was refused and why. Deliberately
-    conservative — a job's declared output directory is often SHARED (several
-    exports write into relion4/), and the raw-data directories must never be
-    reachable from here at all. Pure function so the rules are testable rather
-    than trusted."""
+    conservative — the raw-data directories must never be reachable from here at
+    all. Pure function so the rules are testable rather than trusted.
+
+    Pass `store` and it also refuses any directory ANOTHER job writes to. Several
+    exports legitimately share one RELION project dir, so clearing a failed job
+    could delete the successful job's particles sitting beside it — the outcome
+    that makes "clear and re-run with different parameters" unsafe to offer at
+    all. A job's own jobs/<id>/ is unique by construction and always deletable.
+    """
     root = Path(root)
     targets, skipped = [], []
 
@@ -246,10 +275,19 @@ def job_delete_targets(root, job_id, stage_id, params, output_params=None):
     if (root / jd).is_dir():
         targets.append(jd)
 
+    # Directories some OTHER job also claims, mapped to who claims them.
+    claimed = {}
+    for other_id, other in ((store or {}).get("jobs", {}) or {}).items():
+        if other_id == job_id:
+            continue
+        for rel in declared_output_dirs(root, other):
+            claimed.setdefault(rel, []).append(other_id)
+
     for key in (output_params or []):
         rel = str((params or {}).get(key, "") or "").strip().rstrip("/")
         if not rel:
             continue
+        rel = rel.replace("{jobid}", str(job_id))
         if os.path.isabs(rel):
             try:
                 rel = os.path.relpath(rel, root)
@@ -258,6 +296,10 @@ def job_delete_targets(root, job_id, stage_id, params, output_params=None):
                 continue
         if rel.startswith("..") or rel in PROTECTED_DIRS:
             skipped.append(f"{rel} (protected)")
+            continue
+        if rel in claimed:
+            who = ", ".join(sorted(claimed[rel]))
+            skipped.append(f"{rel} (also written by {who})")
             continue
         if not (root / rel).is_dir():
             continue
@@ -411,7 +453,10 @@ def derive_child_params(child_stage, parent_stage, parent_params, parent_output_
         suffix = str(parent_params.get("suffix", "") or "")
         capx = str(parent_params.get("coords_angpix", "") or "").strip()
         tag = _picktag(suffix) or "picks"
-        outdir = f"relion4/{tag}"
+        # {jobid} resolves to the new job's own id, so two exports of the same pick
+        # set never share a directory. Sharing one is what made "clear this job"
+        # able to delete a DIFFERENT job's particles.
+        outdir = f"relion4/{tag}_{{jobid}}"
         derived = {"input_directory": out_dir or "picks",
                    "input_pattern": f"*{suffix}.star" if suffix else "*.star",
                    "output_processing": outdir,
@@ -432,7 +477,7 @@ def derive_child_params(child_stage, parent_stage, parent_params, parent_output_
         else:                                   # straight from template matching
             infix = match_star_infix(parent_params)
             pat = f"*{infix}.star"
-        outdir = f"relion4/{_picktag(infix)}"   # e.g. relion4/v3-optimized
+        outdir = f"relion4/{_picktag(infix)}_{{jobid}}"   # e.g. relion4/v3_J14
         derived = {"input_directory": mdir, "input_pattern": pat,
                    "output_processing": outdir, "output_star": f"{outdir}/matching.star"}
         # A RELION-derived pick set (source_star present) holds ABSOLUTE pixel coords

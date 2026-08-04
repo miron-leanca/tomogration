@@ -85,6 +85,69 @@ def main():
               "warp_frameseries", "relion4", "m", "jobs", "Refine3D", "Select"):
         check(f"{d} is in PROTECTED_DIRS", d in jobs.PROTECTED_DIRS)
 
+
+    # ---- a job must never delete another job's results ----------------------
+    # J89 and J98 both wrote to relion4/picks_class3_Spike-flower_v5_260804. J89
+    # succeeded, J98 failed. Clearing the failed one would have deleted the
+    # successful one's particles — the outcome that makes "clear it and re-run
+    # with different parameters" unsafe to offer at all.
+    with tempfile.TemporaryDirectory() as tmp3:
+        r3 = Path(tmp3)
+        shared = "relion4/picks_v5"
+        (r3 / shared / "subtomo").mkdir(parents=True)
+        (r3 / shared / "matching.star").write_text("x")
+
+        good = jobs.new_job(r3, "ts_export_particles", "good",
+                            {"output_processing": shared,
+                             "output_star": f"{shared}/matching.star"})
+        bad = jobs.new_job(r3, "ts_export_particles", "bad",
+                           {"output_processing": shared,
+                            "output_star": f"{shared}/matching.star"})
+        (r3 / "jobs" / bad["id"]).mkdir(parents=True)
+        store = jobs.load_jobs(r3)
+        spec = next(x for x in jobs.STAGES if x["id"] == "ts_export_particles")
+
+        t, sk = jobs.job_delete_targets(r3, bad["id"], "ts_export_particles",
+                                        bad["params"], spec.get("output_params"),
+                                        store=store)
+        check("a shared output dir is NOT deletable", shared not in t)
+        check("and the refusal names the other job",
+              any(shared in x and good["id"] in x for x in sk))
+        check("the job's own dir is still deletable",
+              f"jobs/{bad['id']}" in t)
+
+        # Without the store it cannot know, and must not pretend to: the old
+        # behaviour is preserved so the guard is clearly the store's doing.
+        t2, _ = jobs.job_delete_targets(r3, bad["id"], "ts_export_particles",
+                                        bad["params"], spec.get("output_params"))
+        check("without the store the shared dir is not refused", shared in t2)
+
+        # A dir only THIS job writes to stays deletable — the guard must not make
+        # clearing useless.
+        jobs.update_job(r3, good["id"], params={"output_processing": "relion4/other",
+                                                "output_star": "relion4/other/m.star"})
+        (r3 / "relion4/other").mkdir(parents=True)
+        t3, _ = jobs.job_delete_targets(r3, bad["id"], "ts_export_particles",
+                                        bad["params"], spec.get("output_params"),
+                                        store=jobs.load_jobs(r3))
+        check("an unshared output dir is deletable again", shared in t3)
+
+    # {jobid} must resolve, or a job-scoped output looks like no output at all
+    with tempfile.TemporaryDirectory() as tmp4:
+        r4 = Path(tmp4)
+        j = jobs.new_job(r4, "ts_export_particles", "e",
+                         {"output_processing": "relion4/picks_{jobid}"})
+        (r4 / f"relion4/picks_{j['id']}").mkdir(parents=True)
+        spec = next(x for x in jobs.STAGES if x["id"] == "ts_export_particles")
+        t, _ = jobs.job_delete_targets(r4, j["id"], "ts_export_particles",
+                                       j["params"], spec.get("output_params"),
+                                       store=jobs.load_jobs(r4))
+        check("{jobid} resolves in a delete target",
+              f"relion4/picks_{j['id']}" in t)
+        check("declared_output_dirs resolves it too",
+              f"relion4/picks_{j['id']}"
+              in jobs.declared_output_dirs(r4, jobs.load_jobs(r4)["jobs"][j["id"]]))
+
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 

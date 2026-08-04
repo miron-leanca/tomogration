@@ -3848,11 +3848,14 @@ class Tomogration(QMainWindow):
         spec = self._stage_by_id(job.get("stage_id")) or {}
         targets, skipped = job_delete_targets(
             self.project_root, job_id, job.get("stage_id"),
-            job.get("params", {}), spec.get("output_params"))
+            job.get("params", {}), spec.get("output_params"), store=store)
 
         detail = ("\n".join(f"    {r}/   ({self._dir_size_human(r)})" for r in targets)
                   if targets else "    (nothing on disk yet)")
-        note = ("\n\nNOT touched (protected or shared):\n    "
+        # Spell out what is being SPARED, not just what goes. A directory shared
+        # with another job is the case that matters: it means the results you can
+        # see on this card will still be there afterwards, written by someone else.
+        note = ("\n\nLEFT ALONE (protected, or written by another job):\n    "
                 + "\n    ".join(skipped)) if skipped else ""
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
@@ -3916,7 +3919,7 @@ class Tomogration(QMainWindow):
         spec = self._stage_by_id(job.get("stage_id")) or {}
         targets, skipped = job_delete_targets(
             self.project_root, job_id, job.get("stage_id"),
-            job.get("params", {}), spec.get("output_params"))
+            job.get("params", {}), spec.get("output_params"), store=store)
 
         if not targets:
             if QMessageBox.question(
