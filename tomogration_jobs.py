@@ -46,6 +46,14 @@ def save_jobs(root, store):
         pass
 
 
+# The five states a job moves through. BUILDING is the one that was missing: a
+# card created by "Build downstream" or dropped from the palette was born already
+# 'queued', so a job nobody had finished configuring could start on its own the
+# moment the queue drained. Building means "on the canvas, not going anywhere
+# until you say so".
+JOB_STATES = ("building", "queued", "running", "completed", "failed")
+
+
 def queued_jobs(store):
     """Jobs waiting to run, in run order (creation order = J-number order).
 
@@ -102,7 +110,7 @@ def new_job(root, stage_id, label, params, inputs=None):
         "inputs": dict(inputs or {}),
         "output_dir": job_output_dir(jid),
         "command": "",
-        "status": "queued",
+        "status": "building",
         "exit_code": None,
         "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "started": None,
@@ -1201,7 +1209,7 @@ def canvas_layout(store, orphans=None, stage_status=None, hidden=None):
                      "group": spec.get("group", ""), "row": row, "col": col,
                      "x": RAIL_W + col * (CARD_W + GAP_X), "y": y,
                      "w": CARD_W, "h": CARD_H, "is_ghost": False,
-                     "status": job.get("status", "queued"),
+                     "status": job.get("status", "building"),
                      "summary": job.get("summary", {}) or {}}
                 if node_sub is not None:
                     n["subtitle"] = node_sub

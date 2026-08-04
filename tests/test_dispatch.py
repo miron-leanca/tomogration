@@ -127,7 +127,7 @@ with tempfile.TemporaryDirectory() as tmp:
     before = app.load_jobs(root)["jobs"][jid]["status"]
     win._run_job(parent["id"])
     check("busy guard refuses 2nd run",
-          app.load_jobs(root)["jobs"][parent["id"]]["status"] == "queued"
+          app.load_jobs(root)["jobs"][parent["id"]]["status"] == "building"
           and app.load_jobs(root)["jobs"][jid]["status"] == before)
 
     # ---- completion: fake a tomogram so the summarizer has something -------
@@ -203,7 +203,7 @@ with tempfile.TemporaryDirectory() as tmp:
     up = app.new_job(root, "ts_ctf", "CTF", {})
     job = bw._build_job("ts_reconstruct", params={"angpix": "10"}, run=False)
     st = app.load_jobs(root)["jobs"][job["id"]]
-    check("_build_job created a queued job", st["status"] == "queued")
+    check("_build_job created a building job", st["status"] == "building")
     check("_build_job auto-wired input to upstream ctf",
           st["inputs"].get("processing") == up["id"])
     check("_build_job carried params", st["params"].get("angpix") == "10")
@@ -250,7 +250,7 @@ with tempfile.TemporaryDirectory() as tmp:
           st["inputs"].get("processing") == old_tm["id"])
     check("the created card carries the derived params",
           st["params"].get("in_suffix") == "12.56Apx_v1")
-    check("it is queued, not run", st["status"] == "queued")
+    check("it is building, not run", st["status"] == "building")
     check("nothing is left stashed for a later unrelated build",
           "threshold_picks" not in dw._pending_parent)
     check("and it is placed below its parent",
@@ -446,7 +446,8 @@ with tempfile.TemporaryDirectory() as td:
           == app.stage_defaults(spec).get("out_dir"))
     check("the previous round's out_dir is NOT inherited",
           built[0]["params"].get("out_dir") != "picks_from_a_previous_round")
-    check("the dropped card is queued, never run", built[0]["status"] == "queued")
+    check("the dropped card is building, never run",
+          built[0]["status"] == "building")
     check("and it is pinned where it was dropped",
           app.load_jobs(root)["positions"][built[0]["id"]][0] < 500.0)
 
@@ -745,7 +746,9 @@ with tempfile.TemporaryDirectory() as td:
         check("clear keeps the card", rec is not None)
         check("clear removes the results from disk",
               not (root / j["output_dir"]).exists())
-        check("clear returns it to queued", rec["status"] == "queued")
+        # Clear hands the card back for reconfiguring, so BUILDING — not queued,
+        # which would let it run again before it had been looked at.
+        check("clear returns it to building", rec["status"] == "building")
         check("clear keeps the parameters", rec["params"]["angpix"] == "10")
         check("clear resets the exit code", rec["exit_code"] is None)
         check("clear empties the summary", rec["summary"] == {})

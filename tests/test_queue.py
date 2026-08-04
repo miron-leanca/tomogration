@@ -150,6 +150,42 @@ def main():
     check("forking does not disturb the source",
           js[src["id"]]["status"] == "completed")
 
+
+    # ---- the five job states ------------------------------------------------
+    # BUILDING was the missing one. A card from "Build downstream" or the palette
+    # was born already 'queued', so a job nobody had finished configuring could
+    # start on its own the moment the queue drained.
+    with tempfile.TemporaryDirectory() as tmp2:
+        r2 = Path(tmp2)
+        check("all five states are declared",
+              app.JOB_STATES == ("building", "queued", "running", "completed",
+                                 "failed"))
+        b = app.new_job(r2, "ts_ctf", "CTF", {})
+        check("a new job starts BUILDING", b["status"] == "building")
+        check("a building job is NOT in the run queue",
+              b["id"] not in [q["id"] for q in app.queued_jobs(app.load_jobs(r2))])
+        check("a building job still gets a card",
+              b["id"] in {n["id"] for n in app.canvas_layout(app.load_jobs(r2))[0]})
+
+        app.update_job(r2, b["id"], status="queued")
+        check("queueing it puts it in the run queue",
+              [q["id"] for q in app.queued_jobs(app.load_jobs(r2))] == [b["id"]])
+
+        # Cancelling hands the card back for editing rather than deleting it:
+        # "not this one, not yet" must not cost you its parameters and wiring.
+        app.update_job(r2, b["id"], status="building")
+        check("cancelling returns it to building",
+              app.load_jobs(r2)["jobs"][b["id"]]["status"] == "building")
+        check("and it leaves the run queue", app.queued_jobs(app.load_jobs(r2)) == [])
+        check("its parameters survive cancellation",
+              app.load_jobs(r2)["jobs"][b["id"]]["stage_id"] == "ts_ctf")
+
+        # Every state needs a colour, or a job goes invisible on the canvas.
+        for stt in app.JOB_STATES:
+            check(f"'{stt}' has a card style", stt in app._CARD_STYLE)
+        check("building is visually distinct from queued",
+              app._CARD_STYLE["building"] != app._CARD_STYLE["queued"])
+
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 

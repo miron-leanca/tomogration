@@ -50,7 +50,11 @@ with tempfile.TemporaryDirectory() as tmp:
     j1 = app.new_job(root, "ts_ctf", "CTF", {"window": "512"}, inputs={"processing": None})
     check("new_job id J1", j1["id"] == "J1")
     check("new_job output_dir", j1["output_dir"] == "jobs/J1")
-    check("new_job status queued", j1["status"] == "queued")
+    # A new job is BUILDING, not queued: a card nobody has finished configuring
+    # must not start on its own the moment the queue drains.
+    check("new_job status building", j1["status"] == "building")
+    check("a building job is not in the run queue",
+          j1["id"] not in [q["id"] for q in app.queued_jobs(app.load_jobs(root))])
     check("jobs file written", app.jobs_path(root).is_file())
 
     j2 = app.new_job(root, "ts_reconstruct", "Reconstruct", {"angpix": "10"},

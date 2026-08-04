@@ -1279,11 +1279,14 @@ class ProcessingHistory(QDialog):
 _TEMPLATE_STYLE = ("#151b22", "#33414f")
 _TEMPLATE_DONE = ("#16211b", "#2f5c43")     # its stage's output exists on disk
 _RAIL_BG = "#0b0f13"
+_RAIL_HATCH = "#16202a"
 _RAIL_EDGE = "#22303c"
 
 _CARD_STYLE = {
     "ghost":     ("#242424", "#555555"),
-    "queued":    ("#26313a", "#3a6ea5"),
+    # BUILDING — violet. Yours to configure; it will not run until you queue it.
+    "building":  ("#2c2440", "#8b6ed6"),
+    "queued":    ("#26313a", "#3a6ea5"),   # blue: waiting its turn
     "running":   ("#4a3a12", "#f0a92a"),   # BRIGHT amber — the unmistakable one
     "completed": ("#1d3326", "#27ae60"),
     "failed":    ("#3a2320", "#c0392b"),
@@ -1291,6 +1294,52 @@ _CARD_STYLE = {
     # close to 'running' and read as "this job is live" when it wasn't.
     "orphan":    ("#2b2436", "#8a6ec0"),
 }
+
+
+class _QueueChip(QWidget):
+    """One queued job in the terminal's queue strip: its id in blue, with a red ✕
+    that appears on hover to take it back out of the queue.
+
+    The cross is hidden until hover on purpose — the strip is read far more often
+    than it is acted on, and a row of permanent crosses reads as a list of things
+    to dismiss rather than a list of what runs next.
+    """
+    def __init__(self, job_id, label, on_cancel, parent=None):
+        super().__init__(parent)
+        self._job_id = job_id
+        self._on_cancel = on_cancel
+        row = QHBoxLayout(self)
+        row.setContentsMargins(6, 1, 4, 1)
+        row.setSpacing(3)
+        self.name = QLabel(job_id)
+        self.name.setStyleSheet(f"color:#6ea8f0;font-family:{MONO};font-size:11px;")
+        row.addWidget(self.name)
+        self.x = QLabel("✕")
+        self.x.setStyleSheet("color:#c0392b;font-size:11px;font-weight:700;")
+        self.x.setVisible(False)
+        self.x.setCursor(Qt.PointingHandCursor)
+        row.addWidget(self.x)
+        self.setToolTip(f"{job_id} · {label}\nQueued — click ✕ to take it out of the "
+                        f"queue and edit it again.")
+        self.setStyleSheet("background:#151c24;border:1px solid #24354a;"
+                           "border-radius:3px;")
+
+    def enterEvent(self, ev):
+        self.x.setVisible(True)
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self.x.setVisible(False)
+        super().leaveEvent(ev)
+
+    def mousePressEvent(self, ev):
+        # Only the cross cancels: clicking the id itself must not silently unqueue
+        # a job you were only pointing at.
+        if self.x.isVisible() and self.x.geometry().contains(ev.pos()):
+            self._on_cancel(self._job_id)
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
 
 
 class _CardItem(QGraphicsRectItem):
@@ -1882,6 +1931,14 @@ class JobCanvas(QWidget):
             bg = self.scene.addRect(-26, top, CARD_W + 44, bot - top,
                                     QPen(Qt.PenStyle.NoPen), QBrush(QColor(_RAIL_BG)))
             bg.setZValue(-20)
+            # A fine diagonal hatch over the rail's ground: it reads as a plinth the
+            # template stands on, which separates it from the working canvas without
+            # a hard border fighting the cards for attention.
+            hatch = QBrush(QColor(_RAIL_HATCH))
+            hatch.setStyle(Qt.BrushStyle.BDiagPattern)
+            plinth = self.scene.addRect(-26, top, CARD_W + 44, bot - top,
+                                        QPen(Qt.PenStyle.NoPen), hatch)
+            plinth.setZValue(-19)
             sep = self.scene.addLine(CARD_W + 22, top, CARD_W + 22, bot,
                                      QPen(QColor(_RAIL_EDGE), 2))
             sep.setZValue(-19)
@@ -3385,7 +3442,7 @@ class Tomogration(QMainWindow):
         if not spec:
             return
         job = (load_jobs(self.project_root).get("jobs") or {}).get(job_id) or {}
-        if job.get("status") == "queued":
+        if job.get("status") in ("building", "queued"):
             self._param_store[stage_id] = dict(job.get("params") or {})
             self._persist_param_store()
             self._exact_params_for = stage_id     # show its values, not the defaults
@@ -3804,7 +3861,7 @@ class Tomogration(QMainWindow):
         # Back to a fresh queued job. The command is dropped so it is rebuilt from
         # whatever the parameters say NEXT time — keeping a stale command is how an
         # edited card re-runs the old one.
-        update_job(self.project_root, job_id, status="queued", exit_code=None,
+        update_job(self.project_root, job_id, status="building", exit_code=None,
                    started=None, finished=None, summary={}, command="",
                    interrupted=False)
         self._log(f"Cleared {job_id}"
@@ -4335,7 +4392,8 @@ class Tomogration(QMainWindow):
         if want:
             try:
                 j = (load_jobs(self.project_root).get("jobs") or {}).get(want)
-                if j and j.get("status") == "queued" and j.get("stage_id") == spec["id"]:
+                if (j and j.get("status") in ("building", "queued")
+                        and j.get("stage_id") == spec["id"]):
                     bound_job = want
             except Exception:
                 bound_job = None
@@ -5691,9 +5749,67 @@ class Tomogration(QMainWindow):
         self._console_hist = []
         self._console_pos = 0
 
+        # ---- QUEUE STRIP: what runs next, where you are already looking --------
+        # The queue was only legible by reading the canvas for blue cards, which is
+        # a poor way to answer "what happens when this finishes?". One right-aligned
+        # row of ids, in run order.
+        qrow = QHBoxLayout()
+        qrow.setContentsMargins(0, 0, 0, 0)
+        qrow.setSpacing(6)
+        self.queue_label = QLabel("queue")
+        self.queue_label.setStyleSheet("color:#5c6b7a;font-size:10px;")
+        qrow.addWidget(self.queue_label)
+        qrow.addStretch(1)
+        self.queue_chips = FlowLayout(spacing=4)     # wraps when the panel is narrow
+        chipw = QWidget()
+        chipw.setLayout(self.queue_chips)
+        qrow.addWidget(chipw)
+        self.queue_strip = QWidget()
+        self.queue_strip.setLayout(qrow)
+        v.addWidget(self.queue_strip)
+
         w = QWidget()
         w.setLayout(v)
         return w
+
+    def _refresh_queue_chips(self):
+        """The queue as a row of ids under the terminal, in run order."""
+        lay = getattr(self, "queue_chips", None)
+        if lay is None:
+            return
+        while lay.count():                       # FlowLayout owns the old chips
+            it = lay.takeAt(0)
+            wdg = it.widget() if it is not None else None
+            if wdg is not None:
+                wdg.setParent(None)
+        root = getattr(self, "project_root", None)
+        pend = []
+        if isinstance(root, (str, os.PathLike)):
+            try:
+                pend = queued_jobs(load_jobs(root))
+            except Exception:
+                pend = []
+        self.queue_label.setText("queue" if pend else "queue empty")
+        for job in pend:
+            lay.addWidget(_QueueChip(job["id"], job.get("label", ""),
+                                     self._unqueue_job))
+
+    def _unqueue_job(self, job_id):
+        """Take a job out of the queue and hand it back for editing.
+
+        Deliberately BUILDING, not deleted: cancelling a queued job means "not this
+        one, not yet", and throwing away its parameters and wiring to express that
+        would be absurd. Re-queue it from the builder when it is right.
+        """
+        store = load_jobs(self.project_root)
+        job = (store.get("jobs") or {}).get(job_id)
+        if not job or job.get("status") != "queued":
+            return
+        update_job(self.project_root, job_id, status="building")
+        self._log(f"{job_id} taken out of the queue — it is yours to edit again.",
+                  "info")
+        self._refresh_queue()
+        self._refresh_canvas()
 
     # ---- status strip -------------------------------------------------------
     def _set_status(self, text, progress=None):
@@ -5837,6 +5953,7 @@ class Tomogration(QMainWindow):
     def _refresh_queue(self):
         """Render the waiting list straight from the job store (the single source of
         truth). Safe before a project root exists."""
+        self._refresh_queue_chips()
         if not getattr(self, "queue_view", None):
             return
         root = getattr(self, "project_root", None)
