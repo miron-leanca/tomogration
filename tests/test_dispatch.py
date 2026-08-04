@@ -401,5 +401,44 @@ with tempfile.TemporaryDirectory() as tmp:
     check("_show_card_details reveals the details pane", details_shown)
     check("_apply_layout toggles back to lists", back_to_lists)
 
+# ---- dropping a card onto the canvas is not a run ---------------------------
+# A card dragged in from the palette used to inherit _effective_params — the LAST
+# RUN's values — so it arrived pointing at a real output folder from a previous
+# round and immediately asked "output folder is not empty, continue?" about a
+# command nobody had asked to execute.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    w = Win(root)
+    w._param_store = {"relion4_to_warp": {"out_dir": "picks_from_a_previous_round",
+                                          "suffix": "old_v3"}}
+    w._persist_param_store = lambda: None
+    w._refresh_canvas = lambda: None
+    w._select_stage = lambda spec: None
+    asked = []
+    w._confirm_overwrite = lambda spec, params: (asked.append("overwrite"), True)[1]
+    w._confirm_validator = lambda spec, params: (asked.append("validate"), True)[1]
+
+    w._add_stage_from_palette("relion4_to_warp", 500.0, 300.0)
+    built = [j for j in app.load_jobs(root)["jobs"].values()
+             if j["stage_id"] == "relion4_to_warp"]
+    check("palette drop creates exactly one job", len(built) == 1)
+    check("dropping a card asks nothing", asked == [])
+    spec = next(s for s in app.STAGES if s["id"] == "relion4_to_warp")
+    check("a dropped card uses template defaults, not the last run's values",
+          built[0]["params"].get("out_dir")
+          == app.stage_defaults(spec).get("out_dir"))
+    check("the previous round's out_dir is NOT inherited",
+          built[0]["params"].get("out_dir") != "picks_from_a_previous_round")
+    check("the dropped card is queued, never run", built[0]["status"] == "queued")
+    check("and it is pinned where it was dropped",
+          app.load_jobs(root)["positions"][built[0]["id"]][0] < 500.0)
+
+    # Building the same stage the NORMAL way must still ask.
+    asked.clear()
+    w._build_job("relion4_to_warp", params={"out_dir": "x"}, run=False)
+    check("a normal build still runs the pre-flight checks",
+          asked == ["validate", "overwrite"])
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -3140,9 +3140,15 @@ class Tomogration(QMainWindow):
                            lambda: self._delete_job_permanent(jid))
         menu.exec(global_pos)
 
-    def _build_job(self, stage_id, params=None, run=True, parent=None):
+    def _build_job(self, stage_id, params=None, run=True, parent=None, confirm=True):
         """Create a job instance for a stage (auto-wiring its input to the newest
-        upstream WarpTools job) and optionally run it."""
+        upstream WarpTools job) and optionally run it.
+
+        `confirm=False` skips the pre-flight dialogs. They ask about things a RUN
+        would do — overwriting an output folder, ignoring a validator warning — so
+        asking them while merely placing a card on the canvas is a question about a
+        command that is not going to be executed.
+        """
         spec = self._stage_by_id(stage_id)
         if not spec:
             return None
@@ -3158,9 +3164,9 @@ class Tomogration(QMainWindow):
             # newest-upstream default
             parent = self._pending_parent.pop(stage_id, None) or default_parent_for(stage_id, store)
         inputs = {"processing": parent} if parent else {}
-        if not self._confirm_validator(spec, params):
+        if confirm and not self._confirm_validator(spec, params):
             return None
-        if not self._confirm_overwrite(spec, params):
+        if confirm and not self._confirm_overwrite(spec, params):
             return None
         job = new_job(self.project_root, stage_id, spec.get("label", stage_id),
                       params, inputs)
@@ -3296,7 +3302,12 @@ class Tomogration(QMainWindow):
         spec = self._stage_by_id(stage_id)
         if not spec or not self.project_root:
             return
-        job = self._build_job(stage_id, run=False)
+        # TEMPLATE defaults, not _effective_params: the persisted store holds the
+        # last run's values, so a freshly dropped card arrived pre-loaded with a real
+        # output folder from a previous round and immediately asked about overwriting
+        # it. A card you just dragged onto the canvas knows nothing yet.
+        job = self._build_job(stage_id, params=stage_defaults(spec), run=False,
+                              confirm=False)
         jid = (job or {}).get("id")
         if not jid:
             self._log(f"Could not add {stage_title(stage_id, stage_id)} to the canvas.",
