@@ -2002,7 +2002,11 @@ class JobCanvas(QWidget):
         # (that lit all four Extract cards amber at once).
         act = self._active or {}
         running = card_is_running(n, act)
-        if n.get("is_template"):
+        if n.get("is_discovered"):
+            # Green, because it really did run — dashed, because there is no job
+            # record behind it.
+            fill, border = _CARD_STYLE["completed"]
+        elif n.get("is_template"):
             # NEVER a job colour. The rail is the pipeline reference; the moment a
             # template card goes green it reads as completed work, and the eye stops
             # being able to tell the template from the jobs beside it. Everything
@@ -2049,15 +2053,18 @@ class JobCanvas(QWidget):
             # pipeline. What it CAN say is whether this project has any work for
             # that step, which is navigation, not status, so it stays slate.
             k = n.get("n_jobs", 0)
+            # Points RIGHT, at the cards that answer it. When a stage ran outside
+            # the app there is now a card for that too, so the template no longer
+            # has to carry the news itself.
             sub = (f"{k} job{'s' if k != 1 else ''} →" if k
-                   else ("output on disk" if n.get("on_disk") else "no jobs yet"))
+                   else ("ran, no job record →" if n.get("on_disk") else "no jobs yet"))
             sub_colour = "#5c7186" if (k or n.get("on_disk")) else "#3f4d5a"
         elif running:
             prog = act.get("progress", "")
             sub = "▶ running" + (f" · {prog}" if prog else "")
             sub_colour = "#f0a92a"
-        elif n.get("on_disk"):                 # completed outside the app (on disk)
-            sub = "✓ done (on disk)" + (
+        elif n.get("on_disk"):                 # ran outside the app — no job record
+            sub = "✓ ran (no job record)" + (
                 f" · {n['disk_label']}" if n.get("disk_label") else "")
             sub_colour = "#27ae60"
         elif ghost:

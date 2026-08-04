@@ -1228,6 +1228,30 @@ def canvas_layout(store, orphans=None, stage_status=None, hidden=None):
         index[nid] = tmpl
         if not js:
             row_first[sid] = nid
+            # WORK THAT ALREADY EXISTS. Stages run from the terminal, or on the
+            # trunk before the job model, leave real output and no job record.
+            # Saying "output on disk" on the template was not enough: those steps
+            # DID run, and a pipeline that shows nothing for them reads as a
+            # pipeline that never started. Give them a card of their own in the
+            # working canvas — dashed, because it is not a tracked job and cannot
+            # be re-run, forked or deleted like one.
+            if done:
+                did = f"disk:{sid}"
+                if did not in hidden:
+                    disc = {
+                        "id": did, "stage_id": sid,
+                        "label": spec.get("label", sid), "title": title,
+                        "subtitle": st[1] if st and st[1] else "found on disk",
+                        "group": spec.get("group", ""), "row": row, "col": 0,
+                        "x": RAIL_W, "y": y, "w": CARD_W, "h": CARD_H,
+                        "is_ghost": True,        # menu: offer building a real job
+                        "is_discovered": True, "on_disk": True,
+                        "disk_label": (st[1] if done else "") or "",
+                        "status": "completed", "summary": {}}
+                    nodes.append(disc)
+                    # In the index so a user placement applies to it and it can be
+                    # found like any other card.
+                    index[did] = disc
         else:
             for col, (jid, job) in enumerate(js):
                 fork = "(fork)" in str(job.get("label", ""))

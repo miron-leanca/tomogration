@@ -469,5 +469,47 @@ check("DOWNSTREAM edges present",
       "threshold_picks" in app.DOWNSTREAM["ts_template_match"]
       and "ts_export_particles" in app.DOWNSTREAM["threshold_picks"])
 
+
+# ---- work that ran before the job model still gets a card -------------------
+# ts_stack, aretomo, ts_import_alignments and ts_ctf were all run on the trunk or
+# from the terminal: real output, no job record. Saying "output on disk" on the
+# template was not enough — those steps DID run, and a pipeline showing nothing
+# for them reads as one that never started.
+with tempfile.TemporaryDirectory() as tmp:
+    droot = Path(tmp)
+    st_map = {"ts_stack": (True, "290 stacks"), "aretomo": (True, "286 .xf")}
+    nodes, edges = app.canvas_layout(app.load_jobs(droot), [], st_map)
+    idx = {n["id"]: n for n in nodes}
+
+    check("a stage with on-disk output gets its own card", "disk:ts_stack" in idx)
+    d = idx["disk:ts_stack"]
+    check("it reads as completed", d["status"] == "completed")
+    check("it carries what was found", "290 stacks" in d.get("subtitle", ""))
+    check("it is flagged as discovered", d.get("is_discovered") is True)
+    check("it sits in the working canvas, not the rail", d["x"] == app.RAIL_W)
+    check("its stage's template is still in the rail",
+          idx["ghost:ts_stack"]["x"] == 0)
+    check("the template does not overlap it",
+          idx["ghost:ts_stack"]["x"] + app.CARD_W <= d["x"])
+    check("a stage with nothing on disk gets no such card",
+          "disk:ts_ctf" not in idx)
+
+    # It must not masquerade as a tracked job: no id in the store, and the ghost
+    # menu (build a real job from this stage) is the right one for it.
+    check("it is not a job record",
+          "disk:ts_stack" not in app.load_jobs(droot)["jobs"])
+    check("it uses the ghost menu branch", d["is_ghost"] is True)
+
+    # Once a stage HAS jobs, the jobs are the truth — no duplicate disk card.
+    app.new_job(droot, "ts_stack", "stack", {})
+    idx2 = {n["id"]: n for n in app.canvas_layout(app.load_jobs(droot), [], st_map)[0]}
+    check("a stage with real jobs shows no disk card", "disk:ts_stack" not in idx2)
+    check("but the other discovered stage is untouched", "disk:aretomo" in idx2)
+
+    # Hiding one works like hiding any card.
+    idx3 = {n["id"]: n for n in
+            app.canvas_layout(app.load_jobs(droot), [], st_map, {"disk:aretomo"})[0]}
+    check("a discovered card can be hidden", "disk:aretomo" not in idx3)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
