@@ -40,11 +40,11 @@ import time
 import array as _array
 
 from PySide6.QtCore import (
-    Qt, QObject, QEvent, Signal, QProcess, QTimer, QSize, QRect, QPoint,
+    Qt, QObject, QEvent, Signal, QProcess, QTimer, QSize, QRect, QPoint, QMimeData,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QImage, QPixmap, QTextCursor, QFont, QPen, QPainter,
-    QPalette, QFontMetrics,
+    QPalette, QFontMetrics, QDrag,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
@@ -54,7 +54,8 @@ from PySide6.QtWidgets import (
     QInputDialog, QListWidgetItem, QTextBrowser,
     QAbstractScrollArea, QAbstractSpinBox, QSpinBox,
     QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsSimpleTextItem,
-    QMenu, QLayout, QSizePolicy, QProgressBar,
+    QGraphicsItem, QMenu, QLayout, QSizePolicy, QProgressBar, QToolButton,
+    QAbstractItemView,
 )
 
 
@@ -255,6 +256,8 @@ from tomogration_jobs import (
     derive_child_params, summarize_job, summary_text, FRIENDLY_TITLES,
     stage_title, _job_seq, is_cryolo_job, canvas_layout, card_is_running,
     discover_picksets, m_resolution, params_for_builder, job_real_outputs,
+    star_particle_count, relion_card_text, set_card_position, clear_card_positions,
+    set_job_parent,
     discover_relion_jobs, _PICK_STAR_RE,
 )
 
@@ -1284,21 +1287,46 @@ _CARD_STYLE = {
 
 
 class _CardItem(QGraphicsRectItem):
-    """A single card. Holds its node dict and routes clicks to the canvas."""
+    """A single card. Holds its node dict and routes clicks to the canvas.
+
+    Draggable when the canvas is unlocked. The auto-layout (one row per stage,
+    forks across columns) is right for a fresh project and wrong as soon as a real
+    one branches, so a dragged card's position is stored and wins from then on.
+    Locking exists because the same drag gesture also pans the canvas — without a
+    lock you cannot help nudging cards while navigating.
+    """
     def __init__(self, node, canvas):
         super().__init__(0, 0, node["w"], node["h"])
         self._node = node
         self._canvas = canvas
+        self._press_pos = None
         self.setPos(node["x"], node["y"])
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.PointingHandCursor if canvas.locked
+                       else Qt.OpenHandCursor)
+        if not canvas.locked:
+            self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
 
     def mousePressEvent(self, ev):
         if ev.button() == Qt.RightButton:
             self._canvas._menu(self._node, ev.screenPos())
             ev.accept()
             return
+        self._press_pos = self.pos()
         self._canvas._pick(self._node)
         super().mousePressEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        super().mouseReleaseEvent(ev)
+        if self._canvas.locked or self._press_pos is None:
+            return
+        now = self.pos()
+        # A click is a drag of zero distance; only a real move is worth storing (and
+        # worth a repaint, which would otherwise fire on every card selection).
+        if (abs(now.x() - self._press_pos.x()) < 2
+                and abs(now.y() - self._press_pos.y()) < 2):
+            return
+        self._press_pos = None
+        self._canvas._card_moved(self._node, now.x(), now.y())
 
 
 class _DetailsChip(QGraphicsRectItem):
@@ -1335,6 +1363,37 @@ class _CanvasView(QGraphicsView):
     # dragging ANYWHERE moves the canvas; with it off, dragging empty space pans
     # and clicks still select cards.
     hand_mode = False
+    _drop_handler = None
+
+    def set_drop_handler(self, fn):
+        """Accept stage rows dragged out of the job palette. Drops are enabled only
+        once a handler exists, so the view never advertises a drop it can't act on."""
+        self._drop_handler = fn
+        self.setAcceptDrops(fn is not None)
+
+    def dragEnterEvent(self, ev):
+        if self._drop_handler is not None and ev.mimeData().hasFormat(MIME_STAGE):
+            ev.acceptProposedAction()
+        else:
+            super().dragEnterEvent(ev)
+
+    def dragMoveEvent(self, ev):
+        if self._drop_handler is not None and ev.mimeData().hasFormat(MIME_STAGE):
+            ev.acceptProposedAction()
+        else:
+            super().dragMoveEvent(ev)
+
+    def dropEvent(self, ev):
+        if self._drop_handler is None or not ev.mimeData().hasFormat(MIME_STAGE):
+            super().dropEvent(ev)
+            return
+        sid = bytes(ev.mimeData().data(MIME_STAGE)).decode("utf-8", "replace")
+        # Drop where the cursor is, in SCENE coordinates — the view is scrolled and
+        # zoomed, so viewport pixels are not scene units.
+        p = self.mapToScene(ev.position().toPoint())
+        ev.acceptProposedAction()
+        if sid:
+            self._drop_handler(sid, p.x(), p.y())
 
     def set_hand_mode(self, on):
         self.hand_mode = bool(on)
@@ -1494,17 +1553,103 @@ class GpuPanel(QWidget):
             x += 74
 
 
+MIME_STAGE = "application/x-tomogration-stage"
+
+
+class _JobPalette(QWidget):
+    """Drawer listing every stage that can be added, grouped as in the sidebar.
+
+    Exists because the canvas only ever showed the stages the auto-layout decided
+    to draw: to add anything else you had to leave the graph, find the stage in the
+    builder's list, and build from there. Rows are draggable so a job can be placed
+    where it belongs in the branch, and double-clickable for anyone who would
+    rather not drag.
+    """
+    def __init__(self, on_activate, parent=None):
+        super().__init__(parent)
+        self._on_activate = on_activate
+        self.setFixedWidth(232)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(6, 6, 6, 6)
+        v.setSpacing(5)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("filter jobs…")
+        self.search.textChanged.connect(self._repopulate)
+        v.addWidget(self.search)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setDragEnabled(True)
+        self.tree.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.tree.itemDoubleClicked.connect(self._activate)
+        self.tree.startDrag = self._start_drag          # bound below
+        v.addWidget(self.tree, 1)
+
+        hint = QLabel("drag onto the canvas, or double-click")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#6f6f6f;font-size:10px;")
+        v.addWidget(hint)
+        self.setStyleSheet("background:#131a22;")
+        self._repopulate("")
+
+    def _repopulate(self, text):
+        q = (text or "").strip().lower()
+        self.tree.clear()
+        groups = {}
+        for spec in STAGES:
+            title = stage_title(spec["id"], spec.get("label", spec["id"]))
+            hay = f"{title} {spec['id']} {spec.get('label','')}".lower()
+            if q and q not in hay:
+                continue
+            g = spec.get("group", "other")
+            if g not in groups:
+                gi = QTreeWidgetItem([g])
+                gi.setFlags(Qt.ItemFlag.ItemIsEnabled)      # a header, not draggable
+                self.tree.addTopLevelItem(gi)
+                gi.setExpanded(True)
+                groups[g] = gi
+            it = QTreeWidgetItem([title])
+            it.setData(0, Qt.UserRole, spec["id"])
+            it.setToolTip(0, f"{spec['id']} — {spec.get('docs', {}).get('what', '')}")
+            groups[g].addChild(it)
+
+    def _stage_of(self, item):
+        return item.data(0, Qt.UserRole) if item is not None else None
+
+    def _activate(self, item, _col=0):
+        sid = self._stage_of(item)
+        if sid:
+            self._on_activate(sid)
+
+    def _start_drag(self, _actions):
+        sid = self._stage_of(self.tree.currentItem())
+        if not sid:
+            return
+        md = QMimeData()
+        md.setData(MIME_STAGE, sid.encode("utf-8"))
+        drag = QDrag(self.tree)
+        drag.setMimeData(md)
+        drag.exec(Qt.DropAction.CopyAction)
+
+
 class JobCanvas(QWidget):
     # Seconds a per-stage on-disk status stays fresh (see refresh()).
     STATUS_TTL = 45
 
     def __init__(self, root_getter, on_pick, on_details=None, on_menu=None,
-                 on_orphans=None, on_active=None, parent=None):
+                 on_orphans=None, on_active=None, on_add_stage=None, parent=None):
         super().__init__(parent)
         self._root_getter = root_getter      # callable -> project_root str
         self._on_pick = on_pick              # callable(stage_id)
         self._on_details = on_details        # callable(node) | None
         self._on_menu = on_menu              # callable(node, global_qpoint) | None
+        self._on_add_stage = on_add_stage    # callable(stage_id, x, y) | None
+        # Cards are LOCKED by default: dragging empty canvas pans, and an unlocked
+        # card under the cursor would move instead — surprising for anyone who has
+        # not asked to rearrange anything.
+        self.locked = True
         self._status_cache = None    # (ts, root, {stage: (ok,label)})
         self._on_orphans = on_orphans        # callable() -> [orphan descriptor] | None
         self._on_active = on_active          # callable() -> {running, label, progress,
@@ -1540,6 +1685,23 @@ class JobCanvas(QWidget):
         reset.setToolTip("Reset zoom")
         reset.clicked.connect(lambda: self.view.resetTransform())
         tools.addWidget(reset)
+
+        self.lock_btn = QPushButton("🔒 Locked")
+        self.lock_btn.setCheckable(True)
+        self.lock_btn.setChecked(True)
+        self.lock_btn.setToolTip(
+            "Locked: cards stay where the layout puts them and dragging pans the "
+            "canvas.\nUnlocked: drag cards to arrange the workflow into branches "
+            "that make sense.\nPositions are saved with the project.")
+        self.lock_btn.toggled.connect(self._set_locked)
+        tools.addWidget(self.lock_btn)
+
+        self.tidy_btn = QPushButton("Auto-arrange")
+        self.tidy_btn.setToolTip("Discard your card positions and go back to the "
+                                 "computed layout (one row per stage).")
+        self.tidy_btn.clicked.connect(self._reset_positions)
+        tools.addWidget(self.tidy_btn)
+
         hint = QLabel("drag or ✋ to pan · ← → arrows")
         hint.setStyleSheet("color:#6f6f6f;font-size:10px;")
         tools.addWidget(hint)
@@ -1556,7 +1718,74 @@ class JobCanvas(QWidget):
         tw = QWidget()
         tw.setLayout(tools)
         lay.addWidget(tw)
-        lay.addWidget(self.view, 1)
+
+        # ---- job palette + canvas -------------------------------------------
+        # The palette is a drawer, not a permanent column: the canvas is the thing
+        # being read, and a stage list is only wanted while you are adding one.
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+
+        self.palette_btn = QToolButton()
+        self.palette_btn.setText("＋\nA\nD\nD\n \nJ\nO\nB")
+        self.palette_btn.setCheckable(True)
+        self.palette_btn.setToolTip("Show the list of jobs you can add.\n"
+                                    "Drag one onto the canvas to place it there, "
+                                    "or double-click to drop it in the middle.")
+        self.palette_btn.setStyleSheet(
+            "QToolButton{background:#1b2430;color:#9ec5ff;border:1px solid #2f3d4d;"
+            "border-left:none;font-size:9px;padding:8px 2px;}"
+            "QToolButton:checked{background:#24405e;color:#dceaff;}")
+        self.palette_btn.toggled.connect(self._toggle_palette)
+        body.addWidget(self.palette_btn)
+
+        self.palette = _JobPalette(self._add_stage_at_centre)
+        self.palette.setVisible(False)
+        body.addWidget(self.palette)
+        body.addWidget(self.view, 1)
+        bw = QWidget()
+        bw.setLayout(body)
+        lay.addWidget(bw, 1)
+        self.view.set_drop_handler(self._drop_stage)
+
+    # ---- card placement --------------------------------------------------
+    def _set_locked(self, locked):
+        self.locked = bool(locked)
+        self.lock_btn.setText("🔒 Locked" if self.locked else "🔓 Unlocked")
+        # Grab-hand and card dragging both claim a plain left-drag, so turning one
+        # on turns the other off rather than letting them fight over the gesture.
+        if not self.locked and self.hand_btn.isChecked():
+            self.hand_btn.setChecked(False)
+        self.refresh()
+
+    def _card_moved(self, node, x, y):
+        try:
+            set_card_position(self._root_getter(), node["id"], x, y)
+        except Exception:
+            return
+        self.refresh()          # redraw the edges to follow the card
+
+    def _reset_positions(self):
+        try:
+            clear_card_positions(self._root_getter())
+        except Exception:
+            return
+        self.refresh()
+
+    def _toggle_palette(self, on):
+        self.palette.setVisible(bool(on))
+
+    def _add_stage_at_centre(self, stage_id):
+        c = self.view.mapToScene(self.view.viewport().rect().center())
+        self._drop_stage(stage_id, c.x(), c.y())
+
+    def _drop_stage(self, stage_id, x, y):
+        if self._on_add_stage is None:
+            return
+        try:
+            self._on_add_stage(stage_id, x, y)
+        except Exception:
+            pass
 
     def _place_gpu_panel(self):
         """No-op: the GPU strip is laid out by the toolbar, not free-floating.
@@ -1884,7 +2113,8 @@ class Tomogration(QMainWindow):
                                 on_details=self._show_card_details,
                                 on_menu=self._card_menu,
                                 on_orphans=self._discover_orphans,
-                                on_active=self._active_info)
+                                on_active=self._active_info,
+                                on_add_stage=self._add_stage_from_palette)
         self.job_stack.addWidget(
             self._panel("canvasCard", "Workflow graph", self.canvas))
         self._build_align_and_command()   # sets self.align_list_card + self.command_card
@@ -1954,6 +2184,12 @@ class Tomogration(QMainWindow):
         view.addAction("Refresh status", self._refresh_status_dots)
         view.addAction("Show hidden cards", self._show_hidden_cards)
         view.addAction("Found on disk…", self._open_orphan_drawer)
+        view.addSeparator()
+        self._act_lock = view.addAction("Lock card positions", self._toggle_card_lock)
+        self._act_lock.setCheckable(True)
+        self._act_lock.setChecked(True)
+        view.addAction("Auto-arrange cards (discard positions)",
+                       self._reset_all_card_positions)
         view.addAction("Tilt-series groups…", self._open_groups)
 
     # ---- card canvas (Phase 2) ----
@@ -2534,9 +2770,15 @@ class Tomogration(QMainWindow):
             return ""
 
         jtype = str(orph.get("suffix", "")).split("/")[0] or "RELION"
+        # Count the particles ONCE, here, and store it. The canvas repaints every few
+        # seconds while a job runs; re-reading a 6 MB star each time to label a card
+        # would put a filesystem hit on every frame.
+        star = orph.get("star", "")
+        n_particles = star_particle_count(Path(self.project_root) / star) if star else None
         params = {
             "job_dir": rel,
             "job_type": jtype,
+            "n_particles": n_particles or "",
             "data_star": orph.get("star", ""),
             "half1": newest("run_half1_class001_unfil.mrc",
                             "run_it*_half1_class001_unfil.mrc", "*half1*unfil.mrc"),
@@ -2705,9 +2947,15 @@ class Tomogration(QMainWindow):
                     str((j.get("params") or {}).get("source_star")) == source:
                 return jid
         try:
+            # Same reasoning as _adopt_relion_job: read the star once, at creation,
+            # so the card can say WHICH selection and how big without touching disk
+            # on every repaint.
+            n_particles = star_particle_count(Path(self.project_root) / source)
             job = new_job(self.project_root, "ts_template_match",
                           src_tag or "RELION selection",
-                          {"source_star": source}, inputs={})
+                          {"source_star": source, "job_dir": src_tag or source,
+                           "job_type": src_tag or source,
+                           "n_particles": n_particles or ""}, inputs={})
             update_job(self.project_root, job["id"], tool="relion_selection",
                        status="completed", exit_code=0, summary={},
                        finished=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -2880,6 +3128,10 @@ class Tomogration(QMainWindow):
             menu.addAction("Details", lambda: self._show_card_details(node))
             menu.addAction("⤓ Load this run's parameters into builder",
                            lambda: self._load_job_params(jid))
+            menu.addAction("⇄ Set input (which job feeds this)…",
+                           lambda: self._set_job_parent(jid))
+            menu.addAction("⌖ Reset this card's position",
+                           lambda: self._reset_card_position(jid))
             menu.addAction("Open in job builder", lambda: self._canvas_pick(sid))
             menu.addSeparator()
             menu.addAction("Hide (remove from view)", lambda: self._hide_card(node))
@@ -2969,6 +3221,89 @@ class Tomogration(QMainWindow):
                (f" input_pattern={derived['input_pattern']}" if "input_pattern" in derived else "")
         self._log(f"Set up {stage_title(child_stage_id, child_stage_id)} from "
                   f"{parent_id}.{hint}  Adjust, then ▶ Build & run as job.", "ok")
+
+    def _toggle_card_lock(self, checked):
+        """View-menu mirror of the canvas toolbar's lock button (one state, two
+        places to reach it)."""
+        c = getattr(self, "canvas", None)
+        if c is not None:
+            c.lock_btn.setChecked(bool(checked))
+
+    def _reset_card_position(self, node_id):
+        try:
+            clear_card_positions(self.project_root, node_id)
+        except Exception as e:
+            self._log(f"Could not reset position: {e}", "warn")
+            return
+        self._refresh_canvas()
+
+    def _reset_all_card_positions(self):
+        try:
+            clear_card_positions(self.project_root)
+        except Exception as e:
+            self._log(f"Could not reset positions: {e}", "warn")
+            return
+        self._log("Card positions discarded — back to the computed layout.", "info")
+        self._refresh_canvas()
+
+    def _add_stage_from_palette(self, stage_id, x, y):
+        """Create a job for a stage dragged out of the palette, pinned where it was
+        dropped. QUEUED, never run: dropping a card is a layout gesture, and running
+        a GPU job because someone let go of the mouse in the wrong place would be
+        indefensible. Open it in the builder so its parameters are the next thing
+        you see."""
+        spec = self._stage_by_id(stage_id)
+        if not spec or not self.project_root:
+            return
+        job = self._build_job(stage_id, run=False)
+        jid = (job or {}).get("id")
+        if not jid:
+            self._log(f"Could not add {stage_title(stage_id, stage_id)} to the canvas.",
+                      "warn")
+            return
+        try:
+            set_card_position(self.project_root, jid, x - CARD_W / 2, y - CARD_H / 2)
+        except Exception:
+            pass
+        self._log(f"Added {stage_title(stage_id, stage_id)} as {jid} (queued — set its "
+                  f"parameters, then right-click ▸ Run).", "ok")
+        self._refresh_canvas()
+        self._select_stage(spec)
+
+    def _set_job_parent(self, job_id):
+        """Re-wire which job feeds this one. Adoption records no inputs, so an
+        adopted RELION job draws no edge however obviously it feeds the next step —
+        and the graph then lies about the lineage. This makes it editable."""
+        store = load_jobs(self.project_root)
+        jobs_map = store.get("jobs", {}) or {}
+        job = jobs_map.get(job_id)
+        if not job:
+            return
+        choices, labels = [], []
+        for jid, j in sorted(jobs_map.items(), key=lambda t: _job_seq(t[0])):
+            if jid == job_id:
+                continue
+            choices.append(jid)
+            labels.append(f"{jid} · {stage_title(j.get('stage_id',''), j.get('stage_id',''))}"
+                          f" · {j.get('label','')[:40]}")
+        if not choices:
+            self._log("No other jobs to connect to yet.", "info")
+            return
+        cur = next((p for p in (job.get("inputs") or {}).values() if p), None)
+        labels.insert(0, "(no input — detach)")
+        choices.insert(0, "")
+        idx = choices.index(cur) if cur in choices else 0
+        pick, ok = QInputDialog.getItem(
+            self, "Set input", f"Which job feeds {job_id}?", labels, idx, False)
+        if not ok:
+            return
+        parent = choices[labels.index(pick)]
+        if set_job_parent(self.project_root, job_id, parent or None) is None and parent:
+            self._log(f"Could not connect {job_id} to {parent}.", "warn")
+            return
+        self._log(f"{job_id} now reads from {parent}." if parent
+                  else f"{job_id} detached from its input.", "ok")
+        self._refresh_canvas()
 
     def _load_job_params(self, job_id):
         """Populate the job builder with the parameters a past job actually ran with.

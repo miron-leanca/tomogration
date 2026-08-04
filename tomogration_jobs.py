@@ -761,6 +761,174 @@ def _subst_params(pattern, params):
     return out.strip()
 
 
+# ===========================================================================
+# Naming adopted RELION jobs
+#
+# A card reading "RELION selection / Select/job009 · used" says almost nothing:
+# not what kind of job it was, not which one, not how big. RELION's own folder
+# names carry the type and number, and the star carries the particle count — so
+# read all three and put them on the card.
+# ===========================================================================
+RELION_JOB_TITLES = {
+    "Select": "Subset selection",
+    "Class3D": "3D classification",
+    "Class2D": "2D classification",
+    "Refine3D": "3D refinement",
+    "InitialModel": "Initial model",
+    "Extract": "Particle extraction",
+    "MaskCreate": "Mask",
+    "PostProcess": "Post-processing",
+    "CtfRefine": "CTF refinement",
+    "LocalRes": "Local resolution",
+}
+
+
+def relion_job_parts(job_dir):
+    """Split a RELION job path into (type, number) — ('Select', 'job009')."""
+    parts = [p for p in str(job_dir or "").replace("\\", "/").split("/") if p]
+    jtype = jnum = ""
+    for p in parts:
+        if re.fullmatch(r"job\d+", p):
+            jnum = p
+        elif p in RELION_JOB_TITLES:
+            jtype = p
+    if not jtype:
+        # e.g. "Select/job009" handed in without a project prefix
+        for p in parts:
+            if p in RELION_JOB_TITLES:
+                jtype = p
+                break
+    return jtype, jnum
+
+
+def star_particle_count(path, cap=2_000_000):
+    """Rows in a RELION particle star's data block, or None if it can't be read.
+
+    Streams and stops at `cap`; these files reach tens of MB and the count is only
+    ever used as a card subtitle, so reading the whole thing into memory to label a
+    rectangle would be a poor trade.
+    """
+    # Count PER BLOCK, not "the first loop that has rows". A RELION 4 star opens
+    # with data_optics — one row per optics group — so stopping at the first loop
+    # reports "1 particle" for every file in the project.
+    counts, block, in_loop, seen_header, n = {}, "", False, False, 0
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if s.startswith("data_"):
+                    if block:
+                        counts[block] = n
+                    block, in_loop, seen_header, n = s[5:].strip(), False, False, 0
+                    continue
+                if s.startswith("loop_"):
+                    in_loop, seen_header = True, False
+                    continue
+                if s.startswith("_"):
+                    if in_loop:
+                        seen_header = True
+                    continue
+                if in_loop and seen_header:
+                    n += 1
+                    if n >= cap:
+                        break
+    except OSError:
+        return None
+    if block:
+        counts[block] = n
+    if not counts:
+        return 0
+    for name, c in counts.items():
+        if "particles" in name.lower():
+            return c
+    return list(counts.values())[-1]
+
+
+def relion_card_text(job):
+    """(title, subtitle) for an adopted RELION job card.
+
+    Prefers what was recorded at adoption time; falls back to the folder name so a
+    job adopted by an older version still reads sensibly.
+    """
+    params = job.get("params", {}) or {}
+    jdir = params.get("job_dir") or params.get("source_star") or job.get("label", "")
+    # Parse the DIRECTORY: it carries both halves ("Select/job009"). job_type holds
+    # only the type, so reading the number out of it always came back empty.
+    jtype, jnum = relion_job_parts(jdir)
+    if not jtype:
+        jtype = relion_job_parts(params.get("job_type") or "")[0] \
+            or str(params.get("job_type") or "")
+    title = RELION_JOB_TITLES.get(jtype, "") or (jtype or "RELION job")
+    bits = []
+    if jnum:
+        bits.append(jnum)
+    n = params.get("n_particles")
+    if n:
+        try:
+            bits.append(f"{int(n):,} particles")
+        except (TypeError, ValueError):
+            pass
+    return title, " · ".join(bits) or (jdir or "")
+
+
+# ===========================================================================
+# Card positions — the canvas auto-packs stages into rows and forks into
+# columns, which is right for a fresh project and wrong the moment a real
+# project branches. A position stored here overrides the computed one for that
+# node, so the user can arrange the graph to match how they actually think about
+# it. Ghost ids ("ghost:<stage>") are stable, so ghosts can be placed too.
+# ===========================================================================
+def set_card_position(root, node_id, x, y):
+    # Called from a Qt drag handler, so a bad coordinate must not raise into the
+    # event loop — refuse the write and leave the stored layout untouched.
+    try:
+        xy = [round(float(x), 1), round(float(y), 1)]
+    except (TypeError, ValueError):
+        return None
+    store = load_jobs(root)
+    store.setdefault("positions", {})[str(node_id)] = xy
+    save_jobs(root, store)
+    return store
+
+
+def clear_card_positions(root, node_id=None):
+    """Forget one placement, or all of them (back to the computed layout)."""
+    store = load_jobs(root)
+    pos = store.get("positions") or {}
+    if node_id is None:
+        store["positions"] = {}
+    else:
+        pos.pop(str(node_id), None)
+        store["positions"] = pos
+    save_jobs(root, store)
+    return store
+
+
+def set_job_parent(root, job_id, parent_id, slot="processing"):
+    """Re-wire a job's input to a different upstream job (or detach with None).
+
+    The canvas draws edges from job["inputs"], and adoption records none — so an
+    adopted RELION job sits unconnected no matter how obviously it feeds the next
+    step. This makes the DAG editable instead of purely inferred.
+    """
+    store = load_jobs(root)
+    job = (store.get("jobs") or {}).get(job_id)
+    if job is None:
+        return None
+    inputs = dict(job.get("inputs") or {})
+    if parent_id:
+        if parent_id == job_id or parent_id not in (store.get("jobs") or {}):
+            return None
+        inputs[slot] = parent_id
+    else:
+        inputs.pop(slot, None)
+    job["inputs"] = inputs
+    save_jobs(root, store)
+    return job
+
+
 def params_for_builder(spec, recorded):
     """Split a past job's recorded params against what its stage declares TODAY.
 
@@ -946,14 +1114,18 @@ def canvas_layout(store, orphans=None, stage_status=None, hidden=None):
                 # them by what they actually are so the card never reads
                 # 'Template matching' / 'ts_template_match'.
                 if job.get("tool") == "relion_selection":
-                    node_title = "RELION selection"
-                    node_sub = job.get("label", "selection") + " · used"
+                    # "RELION selection · Select/job009 · used" told you nothing about
+                    # WHICH selection or how big. Name the RELION job type, its number
+                    # and its particle count instead.
+                    node_title, node_sub = relion_card_text(job)
                 elif is_cryolo_job(job):
                     node_title = "Convert crYOLO → Warp"
                     node_sub = job.get("label", "crYOLO picks")
                 elif job.get("tool") == "reextract":
                     node_title = "RELION → Warp re-extract"
                     node_sub = job.get("label", "re-extract picks")
+                elif sid == "relion4_result":
+                    node_title, node_sub = relion_card_text(job)
                 else:
                     node_title = title + (" (fork)" if fork else "")
                     node_sub = None
@@ -970,6 +1142,21 @@ def canvas_layout(store, orphans=None, stage_status=None, hidden=None):
                 nodes.append(n)
                 index[jid] = n
             row_first[sid] = js[0][0]
+
+    # USER PLACEMENTS WIN. Applied before edges are computed so the lines follow the
+    # cards rather than pointing at where the auto-layout would have put them. A
+    # position for a node that no longer exists is simply ignored (deleting a job
+    # must not strand a coordinate that later gets reused by a new one).
+    placed = store.get("positions", {}) if isinstance(store, dict) else {}
+    for nid, xy in (placed or {}).items():
+        n = index.get(nid)
+        if not n or not isinstance(xy, (list, tuple)) or len(xy) != 2:
+            continue
+        try:
+            n["x"], n["y"] = float(xy[0]), float(xy[1])
+            n["moved"] = True
+        except (TypeError, ValueError):
+            continue
 
     edges, has_real_parent = [], set()
     for jid, job in jobs.items():
