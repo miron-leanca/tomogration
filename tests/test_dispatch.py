@@ -85,7 +85,12 @@ class Win(app.Tomogration):
         pass
 
     def _select_stage(self, spec):
+        # Mirrors the real one's binding handshake: consume _builder_job_id into
+        # self.current so the run button can be wired to an existing card.
         self._selected = spec["id"]
+        bound = getattr(self, "_builder_job_id", None)
+        self._builder_job_id = None
+        self.current = {"spec": spec, "job_id": bound, "manual": False}
 
     def _persist_param_store(self):
         pass
@@ -474,6 +479,52 @@ with tempfile.TemporaryDirectory() as td:
     check("and the command is the right tool",
           "ts_reconstruct" in st.get("command", ""))
     check("the job is not marked failed", st["status"] != "failed")
+
+
+# ---- the builder must not duplicate the card it just created ----------------
+# _build_downstream creates the card AND opens the builder. The builder is
+# stage-scoped, so its run button always built a NEW job — producing a second card
+# for the same step that ran off on its own while the one being edited stayed
+# queued forever.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    w = Win(root)
+    w._param_store = {}
+    w._prepare_job_inputs = lambda *a, **k: None
+    w._set_status = lambda *a, **k: None
+    sel = app.new_job(root, "ts_template_match", "Subset selection",
+                      {"source_star": "Select/job019/particles.star",
+                       "override_suffix": "picks_v5", "tomo_angpix": "6.28"})
+    app.update_job(root, sel["id"], status="completed", tool="relion_selection")
+    w._build_downstream(sel["id"], "relion4_to_warp")
+    made = [j for j in app.load_jobs(root)["jobs"].values()
+            if j["stage_id"] == "relion4_to_warp"]
+    check("downstream created one converter card", len(made) == 1)
+    check("the builder is bound to that card", w.current["job_id"] == made[0]["id"])
+    check("its star was derived from the selection",
+          made[0]["params"].get("particles_star") == "Select/job019/particles.star")
+
+    # Pressing the builder's run button must run THAT job, not build another.
+    w._values = lambda: dict(made[0]["params"], out_dir="picks_v6")
+    w._confirm_validator = lambda spec, params: True
+    w._confirm_overwrite = lambda spec, params: True
+    w.runner._busy = False
+    w._save_and_run_job(made[0]["id"])
+    after = [j for j in app.load_jobs(root)["jobs"].values()
+             if j["stage_id"] == "relion4_to_warp"]
+    check("running from the builder creates NO second card", len(after) == 1)
+    check("it ran the bound card", after[0]["status"] == "running")
+    check("the form's edits were saved into it",
+          after[0]["params"].get("out_dir") == "picks_v6")
+    check("and its command was resolved", bool(after[0].get("command")))
+
+    # A stage opened any other way stays stage-scoped: no binding, so its run
+    # button still builds a new job.
+    spec = next(x for x in app.STAGES if x["id"] == "relion4_to_warp")
+    w._select_stage_real = app.Tomogration._select_stage
+    check("no binding leaks to the next stage opened",
+          getattr(w, "_builder_job_id", None) is None)
 
 
 print(f"\n{passed} passed, {failed} failed")

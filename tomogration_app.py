@@ -2015,6 +2015,10 @@ class Tomogration(QMainWindow):
         # One-shot: set to a stage id by _load_job_params so the next _select_stage
         # shows a past run's values VERBATIM, with the dynamic defaults suppressed.
         self._exact_params_for = None
+        # One-shot: the QUEUED job the builder is about to edit. Without it the
+        # builder is stage-scoped, so pressing its run button after "Build
+        # downstream" created a SECOND job instead of running the one just made.
+        self._builder_job_id = None
         # Debounce disk writes: a single-shot timer flushes _param_store to config
         # ~0.6s after the last edit (so typing doesn't hammer the JSON).
         self._persist_timer = QTimer(self)
@@ -3295,9 +3299,48 @@ class Tomogration(QMainWindow):
         self._log(f"Built {jid} · {stage_title(child_stage_id, child_stage_id)} "
                   f"from {parent_id}"
                   + (f"  ({', '.join(bits[:3])})" if bits else "")
-                  + ".  Check its parameters, then right-click ▸ Run.", "ok")
+                  + f".  Adjust its parameters, then ▶ Save & run {jid}.", "ok")
         self._refresh_canvas()
+        # Bind the builder to THIS card, so its run button runs it instead of
+        # creating a second job for the same step.
+        self._builder_job_id = jid
         self._select_stage(spec)
+
+    def _save_and_run_job(self, job_id):
+        """Write the form's values back into an existing QUEUED job and run it.
+
+        The builder is stage-scoped, so its run button always built a NEW job. After
+        "Build downstream" — which now creates the card first — that produced a
+        second card for the same step, running off on its own while the one you were
+        editing sat queued forever.
+        """
+        store = load_jobs(self.project_root)
+        job = (store.get("jobs") or {}).get(job_id)
+        spec = (self.current or {}).get("spec") or {}
+        if not job:
+            # The card was deleted while the builder was open. Building a fresh job
+            # is the sane fallback, but say so rather than silently doing it.
+            self._log(f"{job_id} no longer exists — building a new job instead.",
+                      "warn")
+            if spec:
+                self._build_job(spec["id"], run=True)
+            return
+        values = self._values()
+        if not self._confirm_validator(spec, values):
+            return
+        if not self._confirm_overwrite(spec, values):
+            return
+        update_job(self.project_root, job_id, params=values)
+        if self.current.get("manual"):
+            # A hand-edited command is the user's explicit intent — store it and run
+            # it verbatim rather than rebuilding it from the controls.
+            update_job(self.project_root, job_id,
+                       command=self.current["cmd"].toPlainText().strip())
+            self._log(f"Saved your edited command into {job_id}.", "info")
+            self._run_queued_job(job_id)
+        else:
+            update_job(self.project_root, job_id, command="")   # rebuilt by _run_job
+            self._run_job(job_id)
 
     def _node_position(self, node_id):
         """Where a card currently sits on the canvas, honouring any user placement."""
@@ -3358,9 +3401,10 @@ class Tomogration(QMainWindow):
             set_card_position(self.project_root, jid, x - CARD_W / 2, y - CARD_H / 2)
         except Exception:
             pass
-        self._log(f"Added {stage_title(stage_id, stage_id)} as {jid} (queued — set its "
-                  f"parameters, then right-click ▸ Run).", "ok")
+        self._log(f"Added {stage_title(stage_id, stage_id)} as {jid} (queued — set "
+                  f"its parameters, then ▶ Save & run {jid}).", "ok")
         self._refresh_canvas()
+        self._builder_job_id = jid
         self._select_stage(spec)
 
     def _set_job_parent(self, job_id):
@@ -4072,6 +4116,20 @@ class Tomogration(QMainWindow):
         self._log(f"Cleared {len(pend)} queued job(s).", "info")
 
     def _select_stage(self, spec):
+        # Which queued job (if any) this form is editing. Consumed here so any other
+        # route into the builder is plain stage-scoped editing, as before. Only a
+        # QUEUED job binds: a finished one is re-run from its own card.
+        bound_job = None
+        want = getattr(self, "_builder_job_id", None)
+        self._builder_job_id = None
+        if want:
+            try:
+                j = (load_jobs(self.project_root).get("jobs") or {}).get(want)
+                if j and j.get("status") == "queued" and j.get("stage_id") == spec["id"]:
+                    bound_job = want
+            except Exception:
+                bound_job = None
+
         # Highlight the active stage so selection is visible.
         for sid, b in getattr(self, "stage_buttons", {}).items():
             b.setStyleSheet("text-align:left;")
@@ -4193,10 +4251,15 @@ class Tomogration(QMainWindow):
 
         btns = FlowLayout(spacing=6)   # wraps to extra rows when the panel is narrow
         run = QPushButton("▶ Run")
-        build_job = QPushButton("▶ Build & run as job")
-        build_job.setToolTip("Card view: create a job instance on the canvas from these "
-                             "parameters (input auto-wired to the newest upstream job) "
-                             "and run it. Fork a finished job to try variants.")
+        build_job = QPushButton(f"▶ Save & run {bound_job}" if bound_job
+                                else "▶ Build & run as job")
+        build_job.setToolTip(
+            f"Save these parameters into {bound_job} — the card already on the "
+            f"canvas — and run it. (Without this, pressing run here would create a "
+            f"SECOND job for the same step.)" if bound_job else
+            "Card view: create a job instance on the canvas from these parameters "
+            "(input auto-wired to the newest upstream job) and run it. Fork a "
+            "finished job to try variants.")
         rebuild = QPushButton("↻ Rebuild from controls")
         enqueue = QPushButton("+ Queue variant")
         reset = QPushButton("⟲ Reset defaults")
@@ -4215,11 +4278,14 @@ class Tomogration(QMainWindow):
         self.form_box.addWidget(bw)
 
         self.current = {"spec": spec, "controls": controls, "cmd": cmd,
-                        "warn": warn, "manual": False, "guard": False}
+                        "warn": warn, "manual": False, "guard": False,
+                        "job_id": bound_job}
 
         cmd.textChanged.connect(self._on_cmd_edited)
         run.clicked.connect(self._run_current)
-        build_job.clicked.connect(lambda: self._build_job(spec["id"], run=True))
+        build_job.clicked.connect(
+            (lambda: self._save_and_run_job(bound_job)) if bound_job
+            else (lambda: self._build_job(spec["id"], run=True)))
         rebuild.clicked.connect(lambda: self._set_manual(False))
         enqueue.clicked.connect(self._enqueue_current)
         reset.clicked.connect(lambda: self._reset_stage_defaults(spec["id"]))
