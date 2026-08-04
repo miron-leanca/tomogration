@@ -527,5 +527,63 @@ with tempfile.TemporaryDirectory() as td:
           getattr(w, "_builder_job_id", None) is None)
 
 
+# ---- editing a QUEUED card must not clone it --------------------------------
+# "+ Queue variant" always minted a new job. That is right for a second variant
+# and wrong when the card being edited is already sitting in the queue: it made a
+# duplicate card for the same step. Reopening a queued card also left the builder
+# stage-scoped, so every button cloned.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    w = Win(root)
+    w._param_store = {}
+    w._refresh_queue = lambda: None
+    w._prepare_job_inputs = lambda *a, **k: None
+    w._set_status = lambda *a, **k: None
+    w._confirm_validator = lambda spec, params: True
+    w._confirm_overwrite = lambda spec, params: True
+
+    running = app.new_job(root, "ts_export_particles", "Export", {"box": "80"})
+    app.update_job(root, running["id"], status="running")
+    q = app.new_job(root, "relion4_convert", "convert STAR",
+                    {"project_dir": "relion4/v5", "starfile": "matching.star"})
+    app.update_job(root, q["id"], status="queued", command="echo old")
+    check("the queued card is behind the running one",
+          [j["id"] for j in app.queued_jobs(app.load_jobs(root))] == [q["id"]])
+
+    # Reopening it must bind, so the buttons act on it.
+    w._open_job_in_builder(q["id"], "relion4_convert")
+    check("reopening a queued card binds the builder",
+          w.current["job_id"] == q["id"])
+
+    before = len(app.load_jobs(root)["jobs"])
+    w._values = lambda: {"project_dir": "relion4/v6", "starfile": "matching.star"}
+    w.current["manual"] = False
+    w._save_queued_job(q["id"])
+    after = app.load_jobs(root)["jobs"]
+    check("saving a queued card creates NO new card", len(after) == before)
+    check("it stays queued", after[q["id"]]["status"] == "queued")
+    check("the edits were saved",
+          after[q["id"]]["params"]["project_dir"] == "relion4/v6")
+    check("a rebuilt command is cleared so it re-resolves at run time",
+          after[q["id"]]["command"] == "")
+    check("still the only queued job",
+          [j["id"] for j in app.queued_jobs(app.load_jobs(root))] == [q["id"]])
+
+    # A manual command edit is kept verbatim instead of being rebuilt.
+    w.current["manual"] = True
+    w.current["cmd"] = type("C", (), {"toPlainText": lambda self: "  echo mine  "})()
+    w._save_queued_job(q["id"])
+    check("a hand-edited command is stored verbatim",
+          app.load_jobs(root)["jobs"][q["id"]]["command"] == "echo mine")
+
+    # A COMPLETED card must not bind — re-running it is the card's own action.
+    done = app.new_job(root, "ts_ctf", "CTF", {})
+    app.update_job(root, done["id"], status="completed")
+    w._open_job_in_builder(done["id"], "ts_ctf")
+    check("a finished card does not bind the builder",
+          w.current["job_id"] is None)
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

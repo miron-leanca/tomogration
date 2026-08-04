@@ -2541,7 +2541,12 @@ class Tomogration(QMainWindow):
             edit = QPushButton("Open in job builder →")
             edit.setToolTip("Open this STAGE in the job builder with your last-used "
                             "values — not necessarily any particular run's.")
-            edit.clicked.connect(lambda _=False, s=spec: self._select_stage(s))
+            if node.get("is_ghost") or not node.get("id"):
+                edit.clicked.connect(lambda _=False, s=spec: self._select_stage(s))
+            else:
+                edit.clicked.connect(
+                    lambda _=False, j=node.get("id"), sid2=stage_id:
+                    self._open_job_in_builder(j, sid2))
             self.details_box.addWidget(edit)
             if stage_id in ("ts_template_match", "threshold_picks"):
                 nap = QPushButton("🔍 View picks (warp-tm-vis)")
@@ -3111,7 +3116,8 @@ class Tomogration(QMainWindow):
             menu.addAction("Build & run job", lambda: self._build_job(sid, run=True))
             menu.addAction("＋ Queue this job", lambda: self._queue_stage(sid))
             menu.addAction("Build (don't run)", lambda: self._build_job(sid, run=False))
-            menu.addAction("Open in job builder", lambda: self._canvas_pick(sid))
+            menu.addAction("Open in job builder",
+                           lambda: self._open_job_in_builder(jid, sid))
         else:
             jid = node.get("id")
             status = node.get("status", "")
@@ -3305,6 +3311,55 @@ class Tomogration(QMainWindow):
         # creating a second job for the same step.
         self._builder_job_id = jid
         self._select_stage(spec)
+
+    def _open_job_in_builder(self, job_id, stage_id):
+        """Open a card in the builder, bound to it when it is still QUEUED.
+
+        Binding only happened right after a card was created, so reopening a queued
+        card later left the builder stage-scoped — and its buttons then made a
+        duplicate card instead of editing the one on screen. A queued job is exactly
+        the case where the form should be editing THAT job.
+        """
+        spec = self._stage_by_id(stage_id)
+        if not spec:
+            return
+        job = (load_jobs(self.project_root).get("jobs") or {}).get(job_id) or {}
+        if job.get("status") == "queued":
+            self._param_store[stage_id] = dict(job.get("params") or {})
+            self._persist_param_store()
+            self._exact_params_for = stage_id     # show its values, not the defaults
+            self._builder_job_id = job_id
+        self._select_stage(spec)
+
+    def _save_queued_job(self, job_id):
+        """Write the form's values into an already-queued job and LEAVE it queued.
+
+        "+ Queue variant" always minted a new job, which is right when you want a
+        second variant to run alongside and wrong when you are editing a card that is
+        already sitting in the queue — it produced a duplicate card for the same step.
+        Queued jobs run in card order when the one before them finishes, so there is
+        nothing else to do here but save.
+        """
+        store = load_jobs(self.project_root)
+        job = (store.get("jobs") or {}).get(job_id)
+        spec = (self.current or {}).get("spec") or {}
+        if not job:
+            self._log(f"{job_id} no longer exists — nothing saved.", "warn")
+            return
+        values = self._values()
+        if not self._confirm_validator(spec, values):
+            return
+        cmd = (self.current["cmd"].toPlainText().strip()
+               if self.current.get("manual") else "")
+        update_job(self.project_root, job_id, params=values, status="queued",
+                   command=cmd)
+        ahead = [j["id"] for j in queued_jobs(load_jobs(self.project_root))
+                 if _job_seq(j["id"]) < _job_seq(job_id)]
+        when = (f"after {', '.join(ahead)}" if ahead else "next")
+        self._log(f"Saved {job_id}; it stays queued and runs {when}"
+                  + (" (running your edited command verbatim)." if cmd else "."), "ok")
+        self._refresh_canvas()
+        self._refresh_queue()
 
     def _save_and_run_job(self, job_id):
         """Write the form's values back into an existing QUEUED job and run it.
@@ -4250,7 +4305,7 @@ class Tomogration(QMainWindow):
         self.form_box.addWidget(cmd)
 
         btns = FlowLayout(spacing=6)   # wraps to extra rows when the panel is narrow
-        run = QPushButton("▶ Run")
+        run = QPushButton(f"▶ Run {bound_job}" if bound_job else "▶ Run")
         build_job = QPushButton(f"▶ Save & run {bound_job}" if bound_job
                                 else "▶ Build & run as job")
         build_job.setToolTip(
@@ -4261,10 +4316,18 @@ class Tomogration(QMainWindow):
             "(input auto-wired to the newest upstream job) and run it. Fork a "
             "finished job to try variants.")
         rebuild = QPushButton("↻ Rebuild from controls")
-        enqueue = QPushButton("+ Queue variant")
+        enqueue = QPushButton(f"+ Save {bound_job} (stays queued)" if bound_job
+                              else "+ Queue variant")
         reset = QPushButton("⟲ Reset defaults")
         reset.setToolTip("Discard your saved edits for THIS step and restore the "
                          "template defaults (and current dynamic defaults).")
+        if bound_job:
+            enqueue.setToolTip(
+                f"Save these parameters into {bound_job} and leave it queued. It runs "
+                f"automatically when the job before it finishes — queued jobs run in "
+                f"card order. This does NOT create another card.")
+            run.setToolTip(f"Save these parameters into {bound_job} and run it NOW, "
+                           f"ahead of the queue.")
         buttons = [run, build_job, rebuild, enqueue, reset]
         if spec.get("sync_helper"):
             fill = QPushButton("Fill: deselect all unaligned")
@@ -4282,12 +4345,16 @@ class Tomogration(QMainWindow):
                         "job_id": bound_job}
 
         cmd.textChanged.connect(self._on_cmd_edited)
-        run.clicked.connect(self._run_current)
+        run.clicked.connect(
+            (lambda: self._save_and_run_job(bound_job)) if bound_job
+            else self._run_current)
         build_job.clicked.connect(
             (lambda: self._save_and_run_job(bound_job)) if bound_job
             else (lambda: self._build_job(spec["id"], run=True)))
         rebuild.clicked.connect(lambda: self._set_manual(False))
-        enqueue.clicked.connect(self._enqueue_current)
+        enqueue.clicked.connect(
+            (lambda: self._save_queued_job(bound_job)) if bound_job
+            else self._enqueue_current)
         reset.clicked.connect(lambda: self._reset_stage_defaults(spec["id"]))
         self._rebuild_cmd()
 
