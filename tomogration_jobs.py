@@ -410,8 +410,16 @@ def derive_child_params(child_stage, parent_stage, parent_params, parent_output_
             infix = match_star_infix(parent_params)
             pat = f"*{infix}.star"
         outdir = f"relion4/{_picktag(infix)}"   # e.g. relion4/v3-optimized
-        return {"input_directory": mdir, "input_pattern": pat,
-                "output_processing": outdir, "output_star": f"{outdir}/matching.star"}
+        derived = {"input_directory": mdir, "input_pattern": pat,
+                   "output_processing": outdir, "output_star": f"{outdir}/matching.star"}
+        # A RELION-derived pick set (source_star present) holds ABSOLUTE pixel coords
+        # at the pixel size in its filenames — unlike Warp's own and crYOLO's picks,
+        # which are 0-1 fractions. Carry that, because the two conventions look
+        # identical in the form and picking the wrong one extracts from empty space.
+        if parent_params.get("source_star") and parent_params.get("tomo_angpix"):
+            derived["coords_angpix"] = str(parent_params["tomo_angpix"])
+            derived["normalized_coords"] = False
+        return derived
     if child_stage == "relion4_convert" and parent_stage == "ts_export_particles":
         outdir = parent_params.get("output_processing", "relion4/warp")
         # resolve the export's {jobid} to its concrete id so convert runs in the

@@ -2926,10 +2926,17 @@ class Tomogration(QMainWindow):
         update_job(self.project_root, job["id"], status="completed", exit_code=0,
                    tool="reextract", orphan_suffix=suffix, summary={"series": n},
                    finished=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        # These coords are ABSOLUTE PIXELS at the pixel size in the filename — the
+        # opposite of crYOLO's normalised 0-1 picks. This message used to say "keep
+        # --normalized_coords ON", copied from the crYOLO path, which is precisely
+        # the mistake that extracts every particle in one corner. State the flags the
+        # converter itself printed, using the pixel size parsed off these very files.
         self._log(f"Re-extract pick set ({src_tag or 'RELION'}) → {job['id']} "
                   f"({n} tomograms linked). Right-click it ▸ Build downstream ▸ "
-                  f"ts_export_particles to extract at the finer bin (set output_angpix + "
-                  f"box; keep --normalized_coords ON).", "ok")
+                  f"ts_export_particles. These coords are pixels at {angpix} Å/px: set "
+                  f"--coords_angpix {angpix} and leave --normalized_coords OFF, then "
+                  f"choose output_angpix (finer bin) and DOUBLE the box each time you "
+                  f"halve it.", "ok")
         self._refresh_canvas()
 
     def _ensure_selection_job(self, source, src_tag):
@@ -5467,7 +5474,25 @@ class Tomogration(QMainWindow):
             return
         cmd = job.get("command") or ""
         if not cmd:
-            self._log(f"{job_id} has no command — delete it and re-queue.", "fail")
+            # A card placed from the palette (or built with run=False) has params but
+            # no resolved command yet — it was never queued through the builder. That
+            # is a normal state, not a broken job: build the command from its current
+            # params now rather than telling the user to delete and start over.
+            spec = self._stage_by_id(job.get("stage_id", ""))
+            if spec is not None:
+                try:
+                    cmd = build_job_command(spec, job, store, self.warp_launch,
+                                            self._group_inputs)
+                except Exception:
+                    cmd = ""
+            if cmd:
+                update_job(self.project_root, job_id, command=cmd)
+                self._log(f"{job_id} had no stored command — built one from its "
+                          f"parameters.", "info")
+        if not cmd:
+            self._log(f"{job_id} has no command, and one could not be built from its "
+                      f"parameters. Open it in the job builder, set them, then "
+                      f"▶ Build & run as job.", "fail")
             update_job(self.project_root, job_id, status="failed", exit_code=-1)
             self._refresh_canvas()
             return

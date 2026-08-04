@@ -139,7 +139,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("finished stamped", st.get("finished"))
     check("summary attached", st["summary"].get("tomograms") == 2)
     check("summary angpix", st["summary"].get("angpix") == "10.00")
-    check("active_job_id cleared after finish", win._active_job_id is None)
+    # The finished job must be released. _on_finished then CHAINS into the next
+    # queued job, which legitimately becomes the new active one — this used to read
+    # as None only because a queued job with no stored command died on the spot.
+    check("the finished job is no longer active", win._active_job_id != jid)
 
     # ---- failure path ------------------------------------------------------
     job2 = app.new_job(root, "ts_ctf", "CTF", {})
@@ -439,6 +442,31 @@ with tempfile.TemporaryDirectory() as td:
     w._build_job("relion4_to_warp", params={"out_dir": "x"}, run=False)
     check("a normal build still runs the pre-flight checks",
           asked == ["validate", "overwrite"])
+
+# ---- a queued card with no stored command is not a dead card ----------------
+# Cards placed from the palette have params but were never queued through the
+# builder, so they carry no resolved command. That is a normal state: the runner
+# used to declare them broken ("delete it and re-queue") instead of building one.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    w = Win(root)
+    w._refresh_canvas = lambda: None
+    w._refresh_status_dots = lambda: None
+    w._set_status = lambda *a, **k: None
+    w._prepare_job_inputs = lambda *a, **k: None
+    j = app.new_job(root, "ts_reconstruct", "Tomogram reconstruction",
+                    {"settings": "warp_tiltseries.settings", "angpix": "10",
+                     "device_list": "0", "perdevice": 1})
+    check("a palette-style job starts with no command",
+          not app.load_jobs(root)["jobs"][j["id"]].get("command"))
+    w._run_queued_job(j["id"])
+    st = app.load_jobs(root)["jobs"][j["id"]]
+    check("running it builds a command from its params", bool(st.get("command")))
+    check("and the command is the right tool",
+          "ts_reconstruct" in st.get("command", ""))
+    check("the job is not marked failed", st["status"] != "failed")
+
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

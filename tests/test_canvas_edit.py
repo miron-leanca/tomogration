@@ -289,5 +289,31 @@ check("export is downstream of relion4_select_picks",
 check("export is downstream of relion4_to_warp",
       "ts_export_particles" in jobs.DOWNSTREAM["relion4_to_warp"])
 
+
+# ---- pick-set conventions must not be crossed ------------------------------
+# crYOLO/Warp picks are 0-1 FRACTIONS; a RELION-derived re-extract set holds
+# ABSOLUTE PIXELS at the size in its filename. The two look identical in the form,
+# and the completion message for the RELION path told users to turn
+# --normalized_coords ON — copied from the crYOLO path — which piles every particle
+# into one corner.
+d = jobs.derive_child_params(
+    "ts_export_particles", "ts_template_match",
+    {"override_suffix": "picks_v4", "tomo_angpix": "6.28",
+     "source_star": "Select/job019/particles.star"}, "jobs/J83")
+check("a RELION-derived pick set carries its pixel size",
+      d["coords_angpix"] == "6.28")
+check("and is explicitly NOT normalised", d["normalized_coords"] is False)
+check("the derived export agrees with its own pattern",
+      "too far" not in EXP["validate"](
+          {**d, "box": 80, "output_angpix": "3.14", "diameter": "150"}))
+
+# A plain template-match / crYOLO parent has no source_star: it must NOT be given
+# coords_angpix, because those picks really are normalised.
+d2 = jobs.derive_child_params(
+    "ts_export_particles", "ts_template_match",
+    {"override_suffix": "cryolo_combined", "tomo_angpix": "12.56"}, "jobs/J10")
+check("a non-RELION pick set is left normalised",
+      "coords_angpix" not in d2 and "normalized_coords" not in d2)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
