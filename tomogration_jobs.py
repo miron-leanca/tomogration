@@ -366,7 +366,8 @@ DOWNSTREAM = {
     "ts_template_match": ["threshold_picks", "ts_export_particles"],
     "threshold_picks": ["ts_export_particles"],
     "ts_export_particles": ["relion4_convert"],
-    "relion4_convert": ["relion4_class3d"],
+    "relion4_convert": ["relion4_merge_optics", "relion4_class3d"],
+    "relion4_merge_optics": ["relion4_class3d"],
     "relion4_result": ["m_mask_create", "m_create_species",
                        "relion4_to_warp", "relion4_select_picks"],
     # The RELION→Warp converters produce a folder of per-series pick stars, and the
@@ -1100,6 +1101,7 @@ FRIENDLY_TITLES = {
     "relion4_convert": "RELION 4: convert STAR", "relion4_class3d": "RELION 4: Class3D",
     "relion4_select_picks": "RELION 4: select good class",
     "relion4_to_warp": "RELION 4 → Warp: re-extract",
+    "relion4_merge_optics": "RELION 4: merge optics groups",
     "relion4_check_star": "RELION 4: check particles exist",
     "relion4_result": "RELION 4 result",
     "m_check_ctf": "M: CTF pre-flight",

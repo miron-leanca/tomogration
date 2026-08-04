@@ -1122,6 +1122,62 @@ STAGES = [
     },
     {
         # Pre-flight for any RELION run: verify every particle the star lists actually
+        # RELION estimates the initial noise spectrum PER OPTICS GROUP, sampling up
+        # to 1000 particles from each. After M refines spherical aberration per tilt
+        # series (MCore --ctf_cs) every series carries its own Cs, so every series
+        # becomes its own optics group. On EML45: 267 groups, and RELION reported
+        # "Estimating initial noise spectra from 266000 particles" — 5.9 hours
+        # before iteration 1. A pre-M export of the same data has 2 groups and
+        # reports 1000.
+        "group": "10. RELION 4", "id": "relion4_merge_optics",
+        "label": "RELION 4: merge optics groups",
+        "base": "python3",
+        "params": [
+            {"name": "script", "kind": "text", "flag": None,
+             "default": _pkg_script("ml_relion4_merge_optics.py"),
+             "help": "Optics-group merger (shipped with the app)."},
+            {"name": "star", "kind": "text", "flag": None,
+             "default": "",
+             "help": "The converted star to collapse, e.g. "
+             "relion4/<set>/matching_conv.star. REQUIRED. Never modified — a new "
+             "file is written beside it."},
+            {"name": "out", "kind": "text", "flag": "-o",
+             "default": "",
+             "help": "Output star. Blank = <input>_1optics.star next to the input."},
+            {"name": "cs", "kind": "text", "flag": "--cs",
+             "default": "2.7",
+             "help": "Spherical aberration (mm) for the merged group. Cs is a "
+             "property of the MICROSCOPE, so one value is correct; the per-series "
+             "values come from M having refined it. 2.7 is the usual Krios/Talos "
+             "figure — check yours before setting anything else."},
+            {"name": "report", "kind": "check", "flag": "--report",
+             "default": True,
+             "help": "ON = only COUNT the groups and say how much noise estimation "
+             "they will cost; writes nothing. Turn OFF to write the collapsed star."},
+        ],
+        "validate": lambda v: (
+            "⚠ Point 'star' at the converted star to collapse (matching_conv.star)."
+            if not str(v.get("star", "")).strip() else
+            "ℹ REPORT only — nothing is written. Turn 'report' OFF to write the "
+            "collapsed star."
+            if v.get("report") else ""),
+        "docs": {
+            "what": "Collapses a star's optics groups into one, so RELION estimates "
+                    "the initial noise spectrum once instead of once per group.",
+            "range": "Use before 3D classification when the group count is in the "
+                     "hundreds. Check with 'report' first.",
+            "effect": "Writes a NEW star; the input is untouched. Every particle is "
+                      "reassigned to group 1, and the kept parameters are those "
+                      "shared by most groups (Cs overridable).",
+            "pitfall": "The per-series groups are REAL — M refined Cs per tilt "
+                       "series, and that precision is worth keeping for a FINAL "
+                       "refinement. Collapse for CLASSIFICATION, where it only "
+                       "costs time: feed the collapsed star to Class3D and the "
+                       "original to Refine3D.",
+        },
+        "status": None,
+    },
+    {
         # exists on disk. RELION reads the star, not the disk, so a star listing a
         # subtomogram that was never written runs fine for an iteration or two and THEN
         # dies mid-expectation ("Cannot read file ... It does not exist"), wasting the

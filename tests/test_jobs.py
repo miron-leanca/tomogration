@@ -511,5 +511,16 @@ with tempfile.TemporaryDirectory() as tmp:
             app.canvas_layout(app.load_jobs(droot), [], st_map, {"disk:aretomo"})[0]}
     check("a discovered card can be hidden", "disk:aretomo" not in idx3)
 
+
+# Every DOWNSTREAM edge must name a REAL stage on both ends. A stage insert once
+# failed while the DOWNSTREAM edit that accompanied it succeeded, leaving the map
+# pointing at a stage that did not exist — the menu would have offered a build that
+# could never resolve.
+_ids = {x["id"] for x in app.STAGES}
+_bad = sorted({f"{k} -> {c}" for k, v in app.DOWNSTREAM.items() for c in v
+               if k not in _ids or c not in _ids})
+check(f"DOWNSTREAM names only real stages{(' — ' + ', '.join(_bad)) if _bad else ''}",
+      not _bad)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
