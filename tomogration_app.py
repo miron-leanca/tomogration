@@ -3298,17 +3298,22 @@ class Tomogration(QMainWindow):
         self._persist_param_store()
         # Explicit parent, so nothing is left stashed for a later, unrelated build.
         self._pending_parent.pop(child_stage_id, None)
+        # Pick the slot BEFORE creating the job, so the new card is not compared
+        # against itself.
+        try:
+            slot = self._free_slot_below(parent_id)
+        except Exception:
+            slot = None
         job = self._build_job(child_stage_id, params=params, run=False,
                               parent=parent_id, confirm=False)
         jid = (job or {}).get("id")
         if not jid:
             return
-        # Directly below the parent, so the branch reads top-to-bottom.
-        try:
-            px, py = self._node_position(parent_id)
-            set_card_position(self.project_root, jid, px, py + CARD_H + GAP_Y)
-        except Exception:
-            pass
+        if slot is not None:
+            try:
+                set_card_position(self.project_root, jid, slot[0], slot[1])
+            except Exception:
+                pass
         bits = [f"{k}={v}" for k, v in derived.items() if v not in ("", None, False)]
         self._log(f"Built {jid} · {stage_title(child_stage_id, child_stage_id)} "
                   f"from {parent_id}"
@@ -3404,6 +3409,28 @@ class Tomogration(QMainWindow):
         else:
             update_job(self.project_root, job_id, command="")   # rebuilt by _run_job
             self._run_job(job_id)
+
+    def _free_slot_below(self, parent_id):
+        """A free position below `parent_id` for a new child card.
+
+        Every child used to be pinned at exactly "parent + one row", so building a
+        SECOND job downstream of the same parent dropped it precisely on top of the
+        first. The old card was still there and untouched, but it was completely
+        hidden — which reads as the existing card having been reused or overwritten.
+        Siblings step to the right instead, matching how forks are already laid out.
+        """
+        px, py = self._node_position(parent_id)
+        x, y = px, py + CARD_H + GAP_Y
+        store = load_jobs(self.project_root)
+        nodes, _ = canvas_layout(store, [], {}, set(store.get("hidden", [])))
+        taken = [(n["x"], n["y"]) for n in nodes if n.get("id") != parent_id]
+        # Bounded: a canvas with a card in every column would otherwise spin.
+        for _ in range(len(taken) + 2):
+            if not any(abs(x - tx) < CARD_W and abs(y - ty) < CARD_H
+                       for tx, ty in taken):
+                break
+            x += CARD_W + GAP_X
+        return x, y
 
     def _node_position(self, node_id):
         """Where a card currently sits on the canvas, honouring any user placement."""

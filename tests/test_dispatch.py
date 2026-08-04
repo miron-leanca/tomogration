@@ -631,5 +631,54 @@ with tempfile.TemporaryDirectory() as td:
           "job001 is a FIXED name" in spec["docs"]["pitfall"])
 
 
+# ---- a second child must not land on top of the first -----------------------
+# Every child was pinned at exactly "parent + one row", so building a SECOND job
+# downstream of the same parent dropped it precisely onto the first. The old card
+# was untouched but completely hidden, which reads as the existing card having
+# been reused or overwritten.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    w = Win(root)
+    w._param_store = {}
+    sel = app.new_job(root, "ts_template_match", "Subset selection",
+                      {"source_star": "Select/job019/particles.star",
+                       "override_suffix": "picks_v5", "tomo_angpix": "6.28"})
+    app.update_job(root, sel["id"], status="completed", tool="relion_selection")
+
+    w._build_downstream(sel["id"], "relion4_to_warp")
+    w._build_downstream(sel["id"], "relion4_to_warp")
+    kids = sorted((j["id"] for j in app.load_jobs(root)["jobs"].values()
+                   if j["stage_id"] == "relion4_to_warp"), key=app._job_seq)
+    check("building downstream twice makes TWO cards", len(kids) == 2)
+    pos = app.load_jobs(root)["positions"]
+    a, b = pos[kids[0]], pos[kids[1]]
+    check("the second card does not sit on the first", a != b)
+    check("they do not overlap at all",
+          abs(a[0] - b[0]) >= app.CARD_W or abs(a[1] - b[1]) >= app.CARD_H)
+    check("siblings share a row", a[1] == b[1])
+    check("the second is to the RIGHT of the first", b[0] > a[0])
+    px, py = w._node_position(sel["id"])
+    check("both sit one row below their parent", a[1] == py + app.CARD_H + app.GAP_Y)
+    # Not necessarily at the parent's own x: the row below already holds the
+    # auto-laid-out cards for that stage, and stepping clear of those is the point.
+    check("the first child starts at or right of its parent", a[0] >= px)
+    others = [(n["x"], n["y"]) for n in
+              app.canvas_layout(app.load_jobs(root))[0] if n["id"] not in kids]
+    check("no child overlaps any other card",
+          all(abs(c[0] - o[0]) >= app.CARD_W or abs(c[1] - o[1]) >= app.CARD_H
+              for c in (a, b) for o in others))
+    check("neither overwrote the other's record",
+          len({j["id"] for j in app.load_jobs(root)["jobs"].values()}) == 3)
+
+    # A third one keeps stepping right rather than stacking.
+    w._build_downstream(sel["id"], "relion4_to_warp")
+    pos = app.load_jobs(root)["positions"]
+    xs = sorted(pos[k][0] for k in
+                sorted((j["id"] for j in app.load_jobs(root)["jobs"].values()
+                        if j["stage_id"] == "relion4_to_warp"), key=app._job_seq))
+    check("three children occupy three distinct columns", len(set(xs)) == 3)
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
