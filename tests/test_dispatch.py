@@ -181,7 +181,11 @@ with tempfile.TemporaryDirectory() as tmp:
     # empty store and one with jobs, and route a card click to the callback.
     picked, detailed = [], []
     try:
-        canvas = app.JobCanvas(lambda: str(root), lambda sid: picked.append(sid),
+        # The pick callback receives the whole NODE, so a click can bind the
+        # builder to that card. With only a stage id, ▶ Run launched a trunk run
+        # and the card sat at Building while its own work ran untracked.
+        canvas = app.JobCanvas(lambda: str(root),
+                               lambda n: picked.append(n["stage_id"]),
                                on_details=lambda node: detailed.append(node["stage_id"]))
         canvas.refresh()                     # empty-ish store (has jobs from above)
         app.new_job(root, "aretomo", "AreTomo", {})
@@ -854,6 +858,47 @@ with tempfile.TemporaryDirectory() as td:
                   for k in ("job", "template")))
     finally:
         app.QMenu = _orig_menu
+
+
+# ---- clicking a card binds the builder to it --------------------------------
+# Without the binding the form is stage-scoped, so ▶ Run launches a TRUNK run of
+# the stage: the right command executes, nothing updates the card, and it sits at
+# Building while its own work runs untracked beside it.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    w = Win(root)
+    w._param_store = {}
+
+    b = app.new_job(root, "ts_export_particles", "Export", {"box": "112"})
+    nodes, _ = app.canvas_layout(app.load_jobs(root))
+    node = next(n for n in nodes if n["id"] == b["id"])
+    w._canvas_pick(node)
+    check("clicking a Building card binds the builder",
+          w.current["job_id"] == b["id"])
+    check("and shows that card's own parameters",
+          w._param_store["ts_export_particles"]["box"] == "112")
+
+    app.update_job(root, b["id"], status="queued")
+    w._canvas_pick(dict(node, status="queued"))
+    check("clicking a Queued card binds too", w.current["job_id"] == b["id"])
+
+    # A finished card must NOT bind: re-running it is its own card action, and
+    # silently overwriting a completed job's parameters would be worse.
+    app.update_job(root, b["id"], status="completed")
+    w._canvas_pick(dict(node, status="completed"))
+    check("clicking a Completed card does not bind", w.current["job_id"] is None)
+
+    # Templates and discovered cards have no job behind them at all.
+    tmpl = next(n for n in nodes if n.get("is_template"))
+    w._canvas_pick(tmpl)
+    check("clicking a template does not bind", w.current["job_id"] is None)
+    check("but it still opens that stage", w._selected == tmpl["stage_id"])
+
+    # A bare stage id still works — the ghost menu passes one.
+    w._canvas_pick("ts_ctf")
+    check("a bare stage id still opens the stage", w._selected == "ts_ctf")
+    check("and binds nothing", w.current["job_id"] is None)
 
 
 print(f"\n{passed} passed, {failed} failed")

@@ -2084,8 +2084,11 @@ class JobCanvas(QWidget):
                                             n["y"] + n["h"] - 24))
 
     def _pick(self, node):
+        # Pass the whole NODE, not just its stage. Clicking a card and pressing Run
+        # used to launch a TRUNK run of that stage — the card stayed Building while
+        # its own command ran untracked beside it.
         try:
-            self._on_pick(node["stage_id"])
+            self._on_pick(node)
         except Exception:
             pass
 
@@ -2325,8 +2328,24 @@ class Tomogration(QMainWindow):
         view.addAction("Tilt-series groups…", self._open_groups)
 
     # ---- card canvas (Phase 2) ----
-    def _canvas_pick(self, stage_id):
-        """Clicking a card selects its stage in the shared form (read-only)."""
+    def _canvas_pick(self, target):
+        """Open a card (or a bare stage id) in the job builder.
+
+        Accepts a node so clicking a card can BIND the builder to that job. Without
+        the binding the form is stage-scoped, so ▶ Run launches a trunk run of the
+        stage: the right command executes, but nothing updates the card, which sits
+        at Building while its own work runs untracked next to it.
+        """
+        if isinstance(target, dict):
+            node = target
+            stage_id = node.get("stage_id")
+            jid = node.get("id")
+            # Ghost/template/discovered cards have no job behind them.
+            if jid and not node.get("is_ghost") and not node.get("is_orphan"):
+                self._open_job_in_builder(jid, stage_id)
+                return
+        else:
+            stage_id = target
         spec = self._stage_by_id(stage_id)
         if spec:
             self._select_stage(spec)
