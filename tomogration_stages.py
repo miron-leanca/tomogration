@@ -13,30 +13,57 @@ import re
 
 from tomogration_core import _pkg_script
 
-def _validate_export(v):
-    """Warnings for ts_export_particles. Three traps, in order of how badly they bite:
+_APX_TAG_RE = re.compile(r"([0-9]*\.?[0-9]+)Apx")
 
-    1. COORD SCALE. --normalized_coords (coords are 0-1 fractions) and --coords_angpix
-       (coords are pixels at a stated Å/px) are mutually exclusive, and exactly one is
-       needed. Getting it wrong doesn't error — it silently extracts at the wrong places
-       and yields a noise map (normalised values read as pixels pile every particle into
-       one corner).
-    2. BOX vs DIAMETER. box is the container; diameter is where the particle is assumed
-       to end, and everything outside it is the SOLVENT used for background normalisation.
-       If diameter crowds the box there's no solvent shell left to measure.
-    3. RELION launch root — output_star must sit inside output_processing.
+
+def _validate_export(v):
+    """Warnings for ts_export_particles. Four traps, worst first.
+
+    EVERY applicable warning is returned, not just the first. These traps combine —
+    a run once went out with the coordinate scale 4x wrong AND the star written into
+    the previous round's folder, and only the second was reported because it was
+    checked first.
+
+    1. COORD SCALE vs the pick filenames. ml_relion4_select_picks names its output
+       <stem>_<apx>Apx_<suffix>.star where <apx> is the pixel size the coordinates
+       are IN. If coords_angpix disagrees with that tag, every particle is extracted
+       at the wrong distance from the origin — silently, with no error.
+    2. COORD MODE. --normalized_coords (0-1 fractions) and --coords_angpix (pixels
+       at a stated Å/px) are mutually exclusive, and exactly one is needed.
+    3. BOX vs DIAMETER. box is the container; diameter is where the particle is
+       assumed to end, and everything outside it is the SOLVENT used for background
+       normalisation. If diameter crowds the box there's no solvent shell left.
+    4. RELION launch root — output_star must sit inside output_processing.
     """
+    out = []
     norm = bool(v.get("normalized_coords"))
     capx = str(v.get("coords_angpix", "")).strip()
+
+    # 1. The pick filenames state their own pixel size — believe them.
+    tag = _APX_TAG_RE.search(str(v.get("input_pattern", "") or ""))
+    if tag and capx and not norm:
+        try:
+            want, got = float(tag.group(1)), float(capx)
+        except ValueError:
+            want = got = None
+        if want and got and abs(want - got) > 1e-6:
+            out.append(
+                f"⚠ input_pattern says the coordinates are in {want:g} Å/px "
+                f"(*{tag.group(1)}Apx*) but coords_angpix is {got:g}. Every particle "
+                f"would be extracted {got / want:.3g}× too far from the origin, with no "
+                f"error — set coords_angpix to {want:g}.")
+
     if norm and capx:
-        return ("⚠ normalized_coords is ON and coords_angpix is set — they are mutually "
-                "exclusive. Normalised coords are 0-1 fractions and carry no pixel size: "
-                "clear coords_angpix, or turn normalized_coords OFF if coords are pixels.")
+        out.append(
+            "⚠ normalized_coords is ON and coords_angpix is set — they are mutually "
+            "exclusive. Normalised coords are 0-1 fractions and carry no pixel size: "
+            "clear coords_angpix, or turn normalized_coords OFF if coords are pixels.")
     if not norm and not capx:
-        return ("⚠ normalized_coords is OFF and coords_angpix is blank — Warp will not "
-                "know the scale of the input coordinates. Set coords_angpix to the Å/px "
-                "the pick coords are in (e.g. 6.28), or turn normalized_coords ON if "
-                "they are 0-1 fractions.")
+        out.append(
+            "⚠ normalized_coords is OFF and coords_angpix is blank — Warp will not "
+            "know the scale of the input coordinates. Set coords_angpix to the Å/px "
+            "the pick coords are in (e.g. 6.28), or turn normalized_coords ON if "
+            "they are 0-1 fractions.")
     try:
         box_a = float(v.get("box") or 0) * float(str(v.get("output_angpix", "")).strip() or 0)
         diam = float(str(v.get("diameter", "")).strip() or 0)
@@ -44,20 +71,26 @@ def _validate_export(v):
         box_a = diam = 0.0
     if box_a and diam:
         if diam >= box_a:
-            return (f"⚠ diameter ({diam:g} Å) is not smaller than the box "
-                    f"({box_a:g} Å = {v.get('box')} px × {v.get('output_angpix')} Å). The "
-                    f"particle would fill the whole box, leaving no solvent for background "
-                    f"normalisation. Lower diameter, or raise box.")
-        if diam > 0.8 * box_a:
-            return (f"⚠ diameter ({diam:g} Å) is {100 * diam / box_a:.0f}% of the box "
-                    f"({box_a:g} Å). Little solvent left for background normalisation — "
-                    f"aim for ≤80% (ideally 50-70%). Set diameter to the TRUE particle "
-                    f"size, or raise box.")
-    op = str(v.get("output_processing", "") or "")
-    if op and not str(v.get("output_star", "")).startswith(op.rstrip("/") + "/"):
-        return ("⚠ output_star should live INSIDE output_processing so RELION resolves "
-                "the subtomo paths (launch RELION from output_processing).")
-    return ""
+            out.append(
+                f"⚠ diameter ({diam:g} Å) is not smaller than the box "
+                f"({box_a:g} Å = {v.get('box')} px × {v.get('output_angpix')} Å). The "
+                f"particle would fill the whole box, leaving no solvent for background "
+                f"normalisation. Lower diameter, or raise box.")
+        elif diam > 0.8 * box_a:
+            out.append(
+                f"⚠ diameter ({diam:g} Å) is {100 * diam / box_a:.0f}% of the box "
+                f"({box_a:g} Å). Little solvent left for background normalisation — "
+                f"aim for ≤80% (ideally 50-70%). Set diameter to the TRUE particle "
+                f"size, or raise box.")
+    op = str(v.get("output_processing", "") or "").rstrip("/")
+    os_ = str(v.get("output_star", "") or "")
+    if op and os_ and not os_.startswith(op + "/"):
+        out.append(
+            f"⚠ output_star is written to '{os_.rsplit('/', 1)[0]}' but the subtomos go "
+            f"to '{op}'. The star must live INSIDE output_processing or RELION cannot "
+            f"resolve the subtomo paths — and this OVERWRITES whatever star is already "
+            f"in that other folder.")
+    return "\n".join(out)
 
 
 # ===========================================================================
@@ -750,14 +783,14 @@ STAGES = [
         # reported an empty job folder and the files looked lost.
         "settings_param": "settings",
         "output_subdirs": ["reconstruction"],
+        # NOT a blanket "this overwrites" warning: it would fire on every build,
+        # including the first run into an empty folder, and a warning that is always
+        # on is a warning nobody reads. The real check looks at the directory (see
+        # _confirm_overwrite) and only speaks when there is something to lose.
         "validate": lambda v: (
             "⚠ perdevice > 1 with --deconv crashes on V100 (SIGABRT exit 134). "
             "Set perdevice 1 — or, if EML45 is NOT V100, re-test before overriding."
-            if v.get("perdevice", 1) > 1 and v.get("deconv") else
-            "⚠ REPLACES the tomograms in <processing>/reconstruction/. Once M has "
-            "refined the alignments, the old ones cannot be rebuilt — tick "
-            "dont_overwrite, or run this as a job (jobs/<id>/ keeps them separate)."
-            if not v.get("dont_overwrite") else ""),
+            if v.get("perdevice", 1) > 1 and v.get("deconv") else ""),
         "docs": {
             "what": "Back-projects aligned, CTF-corrected tilts into 3D tomograms.",
             "range": "angpix ~10 for viewable tomograms; perdevice 1-2; deconv off for averaging.",

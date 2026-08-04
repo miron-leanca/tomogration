@@ -222,5 +222,72 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a refused re-wire changes nothing",
           jobs.load_jobs(root)["jobs"]["J2"]["inputs"] == {})
 
+
+
+# ---- the export traps that actually fired ----------------------------------
+# A re-extraction went out with coords_angpix 12.56 while the pick files said
+# 3.14Apx, AND its star aimed at the previous round's folder. Both were
+# detectable; only one was reported, because the validator returned the FIRST
+# warning and stopped.
+st = load("tomogration_stages")
+EXP = next(s for s in st.STAGES if s["id"] == "ts_export_particles")
+bad = {"input_pattern": "*Spike-flower_v2.star", "coords_angpix": "12.56",
+       "normalized_coords": False, "box": 80, "output_angpix": "3.14",
+       "diameter": "150", "output_processing": "relion4/picks_v2",
+       "output_star": "relion4/picks_v1/matching.star"}
+msg = EXP["validate"](bad)
+check("no Apx tag in the pattern -> no scale warning", "too far" not in msg)
+check("mismatched output_star is still reported", "OVERWRITES" in msg)
+
+bad["input_pattern"] = "*3.14Apx_picks_class3_Spike-flower_v2.star"
+msg = EXP["validate"](bad)
+check("a pattern stating 3.14Apx vs coords_angpix 12.56 is caught",
+      "coords_angpix is 12.56" in msg and "3.14" in msg)
+check("the warning quantifies the error", "4×" in msg or "4x" in msg)
+check("BOTH problems are reported together",
+      "coords_angpix" in msg and "OVERWRITES" in msg)
+
+good = dict(bad, coords_angpix="3.14",
+            output_star="relion4/picks_v2/matching.star")
+check("a correct export produces no warning at all",
+      EXP["validate"](good) == "")
+check("matching tag and coords -> no scale warning",
+      "too far" not in EXP["validate"](good))
+# normalized_coords carries no pixel size, so the tag must not be compared to it
+check("normalised coords are not compared against the Apx tag",
+      "too far" not in EXP["validate"](
+          dict(good, normalized_coords=True, coords_angpix="")))
+
+# ---- an export wired to a converter inherits every fiddly value -------------
+d = jobs.derive_child_params(
+    "ts_export_particles", "relion4_select_picks",
+    {"out_dir": "picks_class3_Spike-flower_v2_260803", "suffix": "picks_v2",
+     "coords_angpix": "3.14"}, "jobs/J74")
+check("input_directory comes from the converter's out_dir",
+      d["input_directory"] == "picks_class3_Spike-flower_v2_260803")
+check("input_pattern is built from the converter's suffix",
+      d["input_pattern"] == "*picks_v2.star")
+check("coords_angpix is carried, not retyped", d["coords_angpix"] == "3.14")
+check("output_star lands inside output_processing",
+      d["output_star"].startswith(d["output_processing"] + "/"))
+check("the derived export passes its own validator",
+      EXP["validate"]({**d, "box": 80, "output_angpix": "3.14",
+                       "diameter": "150"}) == "")
+check("relion4_to_warp derives the same way",
+      jobs.derive_child_params("ts_export_particles", "relion4_to_warp",
+                               {"out_dir": "picks", "suffix": "s",
+                                "coords_angpix": "6.28"})["coords_angpix"] == "6.28")
+check("a converter with no coords_angpix omits it rather than guessing",
+      "coords_angpix" not in jobs.derive_child_params(
+          "ts_export_particles", "relion4_to_warp",
+          {"out_dir": "picks", "suffix": "s"}))
+
+# The edge has to exist or the menu never offers it — that is why the export fell
+# back to "newest threshold_picks" and inherited the wrong pick set.
+check("export is downstream of relion4_select_picks",
+      "ts_export_particles" in jobs.DOWNSTREAM["relion4_select_picks"])
+check("export is downstream of relion4_to_warp",
+      "ts_export_particles" in jobs.DOWNSTREAM["relion4_to_warp"])
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -257,7 +257,7 @@ from tomogration_jobs import (
     stage_title, _job_seq, is_cryolo_job, canvas_layout, card_is_running,
     discover_picksets, m_resolution, params_for_builder, job_real_outputs,
     star_particle_count, relion_card_text, set_card_position, clear_card_positions,
-    set_job_parent,
+    set_job_parent, settings_processing_dir,
     discover_relion_jobs, _PICK_STAR_RE,
 )
 
@@ -3158,6 +3158,8 @@ class Tomogration(QMainWindow):
             # newest-upstream default
             parent = self._pending_parent.pop(stage_id, None) or default_parent_for(stage_id, store)
         inputs = {"processing": parent} if parent else {}
+        if not self._confirm_validator(spec, params):
+            return None
         if not self._confirm_overwrite(spec, params):
             return None
         job = new_job(self.project_root, stage_id, spec.get("label", stage_id),
@@ -3169,6 +3171,30 @@ class Tomogration(QMainWindow):
             self._run_job(job["id"])
         return job
 
+    def _confirm_validator(self, spec, params):
+        """Make a stage's ⚠ warnings BLOCK, not merely decorate.
+
+        The warnings were a red label under the form, and nothing stopped a job being
+        built, queued or run with one active. An export went out with the coordinate
+        scale 4x wrong and its star aimed at the previous round's folder — both
+        already detected, both silently ignored, and the mistake only surfaced hours
+        later in the extracted data. Returns True to proceed.
+        """
+        fn = spec.get("validate")
+        if not fn:
+            return True
+        try:
+            msg = fn(params) or ""
+        except Exception:
+            return True
+        if not msg.strip():
+            return True
+        return QMessageBox.warning(
+            self, f"{spec.get('label', spec['id'])} — check these first",
+            f"{msg}\n\nThese are silent failures: the command will run and exit 0, "
+            f"and the damage only shows up in the results.\n\nRun anyway?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
     def _confirm_overwrite(self, spec, params):
         """If this step's declared output dir already holds files, say so and ask.
 
@@ -3178,15 +3204,30 @@ class Tomogration(QMainWindow):
         proceed. Only ever LOOKS; nothing is deleted here."""
         keys = spec.get("output_params") or []
         root = getattr(self, "project_root", None)
-        if not keys or not isinstance(root, (str, os.PathLike)):
+        subdirs = spec.get("output_subdirs") or []
+        if not (keys or subdirs) or not isinstance(root, (str, os.PathLike)):
             return True
+        cands = [str((params or {}).get(k, "") or "").strip().rstrip("/") for k in keys]
+        # Stages that write into a fixed subfolder of the PROCESSING folder named in
+        # the .settings file (ts_reconstruct -> reconstruction/) name it nowhere in
+        # their params, so a re-run silently replaced tomograms that — once M has
+        # refined the alignments they were built from — cannot be rebuilt.
+        if subdirs:
+            proc = str((params or {}).get("output_processing", "") or "").strip()
+            if not proc:
+                try:
+                    proc = settings_processing_dir(
+                        root, (params or {}).get(spec.get("settings_param", "settings"), ""))
+                except Exception:
+                    proc = ""
+            if proc:
+                cands += [f"{proc.rstrip('/')}/{s}" for s in subdirs]
         hits = []
-        for k in keys:
-            rel = str((params or {}).get(k, "") or "").strip().rstrip("/")
+        for rel in cands:
             if not rel:
                 continue
             n = self._count_dir_entries(rel, cap=2)
-            if n:
+            if n and rel not in hits:
                 hits.append(rel)
         if not hits:
             return True
@@ -4494,6 +4535,9 @@ class Tomogration(QMainWindow):
         if not cmd:
             return
         spec = self.current["spec"]
+        # Same gate as _build_job: a live ⚠ must be acknowledged, not decorative.
+        if not self._confirm_validator(spec, self._values()):
+            return
         # Per-job nudge: for back-half stages, prefer a job (own dir, forkable) over
         # overwriting the shared trunk. Manual command edits can't carry into a job
         # (it rebuilds from params + wiring), so only offer this on an unedited cmd.
@@ -4642,6 +4686,10 @@ class Tomogration(QMainWindow):
         if not cmd:
             return
         spec = self.current["spec"]
+        # Queueing is the easiest way to ignore a warning: you set it up, walk away,
+        # and it runs overnight. Gate it too.
+        if not self._confirm_validator(spec, self._values()):
+            return
         if spec.get("requires_coarse_alignment"):
             if not self._coarse_alignment_gate():
                 return

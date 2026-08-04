@@ -454,10 +454,19 @@ with tempfile.TemporaryDirectory() as tmp:
 # Overwriting is the expensive mistake: a reconstruction cannot be rebuilt once M
 # has changed the alignments it was made from. Warn unless a separate destination
 # was given.
-check("ts_reconstruct warns about replacing tomograms by default",
-      "REPLACES" in REC["validate"]({"perdevice": 1}))
-check("no warning once dont_overwrite is ticked",
-      REC["validate"]({"perdevice": 1, "dont_overwrite": True}) == "")
+# Overwrite protection deliberately does NOT live in validate(): a warning that
+# fires on every build — including a first run into an empty folder — is one
+# nobody reads. It belongs in _confirm_overwrite, which looks at the directory and
+# speaks only when there is something to lose. What validate() must still declare
+# is where that directory IS.
+check("ts_reconstruct does not warn unconditionally",
+      REC["validate"]({"perdevice": 1}) == "")
+check("ts_reconstruct declares the subfolder it fills",
+      REC.get("output_subdirs") == ["reconstruction"])
+check("and which param names its settings file",
+      REC.get("settings_param") == "settings")
+check("dont_overwrite is exposed so a run can protect an existing set",
+      any(p["name"] == "dont_overwrite" for p in REC["params"]))
 check("the V100 deconv warning still wins",
       "V100" in REC["validate"]({"perdevice": 2, "deconv": True}))
 # The stage must NOT declare its own --output_processing: job mode wires that

@@ -319,6 +319,13 @@ DOWNSTREAM = {
     "relion4_convert": ["relion4_class3d"],
     "relion4_result": ["m_mask_create", "m_create_species",
                        "relion4_to_warp", "relion4_select_picks"],
+    # The RELION→Warp converters produce a folder of per-series pick stars, and the
+    # only thing that consumes those is an export. Without these edges the export
+    # could not be built downstream of a selection at all: it fell back to "newest
+    # threshold_picks", so a re-extraction silently inherited the wrong pick set,
+    # the wrong pixel size and the previous round's output paths.
+    "relion4_select_picks": ["ts_export_particles"],
+    "relion4_to_warp": ["ts_export_particles"],
     "m_create_population": ["m_create_source"],
     "m_create_source": ["m_create_species"],
     "m_mask_create": ["m_create_species"],
@@ -370,6 +377,29 @@ def derive_child_params(child_stage, parent_stage, parent_params, parent_output_
 
     if child_stage == "threshold_picks" and parent_stage == "ts_template_match":
         return {"in_suffix": match_star_infix(parent_params)}
+    # An export fed by a RELION→Warp converter. Every one of these five values was
+    # previously carried over by hand from the last round, and a re-extraction went
+    # out with the previous round's directory, pattern, pixel size and output paths —
+    # extracting 4x off-origin into the wrong project folder, exit 0, no error.
+    # The converter already knows all of them.
+    if child_stage == "ts_export_particles" and parent_stage in (
+            "relion4_select_picks", "relion4_to_warp"):
+        out_dir = str(parent_params.get("out_dir", "") or "").rstrip("/")
+        suffix = str(parent_params.get("suffix", "") or "")
+        capx = str(parent_params.get("coords_angpix", "") or "").strip()
+        tag = _picktag(suffix) or "picks"
+        outdir = f"relion4/{tag}"
+        derived = {"input_directory": out_dir or "picks",
+                   "input_pattern": f"*{suffix}.star" if suffix else "*.star",
+                   "output_processing": outdir,
+                   "output_star": f"{outdir}/matching.star",
+                   "normalized_coords": False}
+        if capx:
+            # The converter states the pixel size its coordinates are in, and names
+            # its files with it. Carrying it removes the single most damaging
+            # hand-copied value in the pipeline.
+            derived["coords_angpix"] = capx
+        return derived
     if child_stage == "ts_export_particles":
         mdir = f"{parent_output_dir}/matching" if parent_output_dir else "warp_tiltseries/matching"
         if parent_stage == "threshold_picks":
