@@ -244,7 +244,30 @@ with tempfile.TemporaryDirectory() as tmp:
     ctf2 = app.new_job(croot, "ts_ctf", "CTF wide", {"window": "1024"})
     nodes, _ = app.canvas_layout(app.load_jobs(croot))
     ctf_row = [n for n in nodes if n["stage_id"] == "ts_ctf"]
-    check("fork: two nodes on ts_ctf row", len(ctf_row) == 2)
+    jobs_row = [n for n in ctf_row if not n.get("is_template")]
+    tmpl_row = [n for n in ctf_row if n.get("is_template")]
+    check("fork: two JOB nodes on ts_ctf row", len(jobs_row) == 2)
+    # The template rail is the default pipeline as a permanent reference, so it is
+    # present for EVERY stage — including ones that already have real jobs. It used
+    # to appear only for stages with none, so the template dissolved exactly as a
+    # project got complicated.
+    check("fork: the stage still shows its template card", len(tmpl_row) == 1)
+    check("every stage has exactly one template card",
+          len([n for n in nodes if n.get("is_template")]) == len(app.STAGES))
+    check("the template sits in the rail at x=0", tmpl_row[0]["x"] == 0)
+    check("real jobs start right of the rail",
+          all(n["x"] >= app.RAIL_W for n in nodes if not n.get("is_template")))
+    check("so no job can overlap the template",
+          app.RAIL_W >= app.CARD_W)
+    # The rail is its own top-to-bottom chain; it must not wire into real jobs.
+    _, edges2 = app.canvas_layout(app.load_jobs(croot))
+    rail = [(a, b) for a, b in edges2
+            if str(a).startswith("ghost:") or str(b).startswith("ghost:")]
+    check("every rail edge joins two templates",
+          all(str(a).startswith("ghost:") and str(b).startswith("ghost:")
+              for a, b in rail))
+    check("the rail chains consecutive stages",
+          ("ghost:" + app.STAGES[0]["id"], "ghost:" + app.STAGES[1]["id"]) in rail)
     check("fork: distinct columns (side by side)",
           {n["col"] for n in ctf_row} == {0, 1}
           and ctf_row[0]["x"] != ctf_row[1]["x"])

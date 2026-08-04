@@ -680,5 +680,91 @@ with tempfile.TemporaryDirectory() as td:
     check("three children occupy three distinct columns", len(set(xs)) == 3)
 
 
+# ---- clear job: the results go, the card stays ------------------------------
+# Between "delete the job, keep the files" and "delete both" there was no way to
+# say "that attempt was wrong, try again": you deleted the card and lost its
+# parameters and wiring with it. Re-running over a half-written output dir also
+# mixes two attempts' files, which is how a failed export leaves a star that
+# looks complete.
+class _Box:
+    Warning = 0
+    DestructiveRole = 1
+    RejectRole = 2
+    refused = []
+
+    def __init__(self, *a, **k):
+        self._btns = []
+        self._yes = None
+        self._clicked = None
+
+    def setIcon(self, *a): pass
+    def setWindowTitle(self, *a): pass
+    def setText(self, t): self.text = t
+    def setInformativeText(self, t): self.info = t
+
+    def addButton(self, label, role):
+        b = object()
+        self._btns.append(b)
+        if role == _Box.DestructiveRole:
+            self._yes = b
+        return b
+
+    def buttons(self): return self._btns
+    def setDefaultButton(self, *a): pass
+    def exec(self): self._clicked = self._yes          # always confirm
+    def clickedButton(self): return self._clicked
+
+    @staticmethod
+    def warning(parent, title, text, *a, **k):
+        _Box.refused.append(text)
+        return None
+
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    w = Win(root)
+    w._param_store = {}
+    w._refresh_queue = lambda: None
+    w._invalidate_orphans = lambda: None
+    w._invalidate_status = lambda: None
+    w._dir_size_human = lambda rel: "1 MB"
+    _orig_box = app.QMessageBox
+    app.QMessageBox = _Box
+    try:
+        j = app.new_job(root, "ts_reconstruct", "Reconstruct", {"angpix": "10"})
+        out = root / j["output_dir"] / "reconstruction"
+        out.mkdir(parents=True)
+        (out / "Position001_10.00Apx.mrc").write_bytes(b"\0")
+        app.update_job(root, j["id"], status="completed", exit_code=0,
+                       command="WarpTools ts_reconstruct --angpix 10",
+                       finished="2026-08-04 10:00:00", summary={"tomograms": 1})
+
+        w._clear_job(j["id"])
+        rec = app.load_jobs(root)["jobs"].get(j["id"])
+        check("clear keeps the card", rec is not None)
+        check("clear removes the results from disk",
+              not (root / j["output_dir"]).exists())
+        check("clear returns it to queued", rec["status"] == "queued")
+        check("clear keeps the parameters", rec["params"]["angpix"] == "10")
+        check("clear resets the exit code", rec["exit_code"] is None)
+        check("clear empties the summary", rec["summary"] == {})
+        check("clear drops the finish time", rec["finished"] is None)
+        # A stale command is how an edited card re-runs the OLD one.
+        check("clear drops the stale command", rec["command"] == "")
+        check("clear opens it for reconfiguring", w._selected == "ts_reconstruct")
+
+        # Clearing a RUNNING job would delete files out from under a live process.
+        _Box.refused.clear()
+        j2 = app.new_job(root, "ts_ctf", "CTF", {})
+        app.update_job(root, j2["id"], status="running")
+        w._clear_job(j2["id"])
+        check("clear refuses a running job",
+              app.load_jobs(root)["jobs"][j2["id"]]["status"] == "running")
+        check("and says why", any("running" in t for t in _Box.refused))
+    finally:
+        app.QMessageBox = _orig_box
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -1274,6 +1274,13 @@ class ProcessingHistory(QDialog):
 # fork controls are Phase 3.
 # ===========================================================================
 # (fill, border) per status. Ghost = dim + dashed; others tint by outcome.
+# The template rail reads as a PRINTED REFERENCE, not as work: cool slate on a
+# darker ground, so a real job of any status is unmistakably brighter than it.
+_TEMPLATE_STYLE = ("#151b22", "#33414f")
+_TEMPLATE_DONE = ("#16211b", "#2f5c43")     # its stage's output exists on disk
+_RAIL_BG = "#0b0f13"
+_RAIL_EDGE = "#22303c"
+
 _CARD_STYLE = {
     "ghost":     ("#242424", "#555555"),
     "queued":    ("#26313a", "#3a6ea5"),
@@ -1301,9 +1308,12 @@ class _CardItem(QGraphicsRectItem):
         self._canvas = canvas
         self._press_pos = None
         self.setPos(node["x"], node["y"])
-        self.setCursor(Qt.PointingHandCursor if canvas.locked
-                       else Qt.OpenHandCursor)
-        if not canvas.locked:
+        # The template rail is fixed furniture: it is the reference the working
+        # canvas is read against, so it never moves and never gets dragged out of
+        # order by accident.
+        movable = not canvas.locked and not node.get("is_template")
+        self.setCursor(Qt.OpenHandCursor if movable else Qt.PointingHandCursor)
+        if movable:
             self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
 
     def mousePressEvent(self, ev):
@@ -1759,6 +1769,9 @@ class JobCanvas(QWidget):
         self.refresh()
 
     def _card_moved(self, node, x, y):
+        # Keep real work out of the rail — that overlap is what made the default
+        # pipeline unreadable in the first place.
+        x = max(float(x), float(RAIL_W))
         try:
             set_card_position(self._root_getter(), node["id"], x, y)
         except Exception:
@@ -1859,14 +1872,43 @@ class JobCanvas(QWidget):
         nodes, edges = canvas_layout(store, orphans, stage_status, hidden)
         index = {n["id"]: n for n in nodes}
 
+        # The rail's own ground, drawn first so every card sits on top of it. Gives
+        # the default pipeline a place of its own instead of leaving it as loose
+        # cards the working canvas can drift over.
+        tmpl = [n for n in nodes if n.get("is_template")]
+        if tmpl:
+            top = min(n["y"] for n in tmpl) - 34
+            bot = max(n["y"] + n["h"] for n in tmpl) + 20
+            bg = self.scene.addRect(-26, top, CARD_W + 44, bot - top,
+                                    QPen(Qt.PenStyle.NoPen), QBrush(QColor(_RAIL_BG)))
+            bg.setZValue(-20)
+            sep = self.scene.addLine(CARD_W + 22, top, CARD_W + 22, bot,
+                                     QPen(QColor(_RAIL_EDGE), 2))
+            sep.setZValue(-19)
+            cap = QGraphicsSimpleTextItem("DEFAULT PIPELINE")
+            cap.setBrush(QColor("#5c7186"))
+            cf = QFont()
+            cf.setPointSize(8)
+            cf.setBold(True)
+            cap.setFont(cf)
+            cap.setPos(-18, top + 8)
+            cap.setZValue(-18)
+            self.scene.addItem(cap)
+
         edge_pen = QPen(QColor("#4a4a4a"))
         edge_pen.setWidth(2)
+        rail_pen = QPen(QColor(_RAIL_EDGE))
+        rail_pen.setWidth(2)
         for src, dst in edges:
             a, b = index.get(src), index.get(dst)
             if not a or not b:
                 continue
-            self.scene.addLine(a["x"] + a["w"] / 2, a["y"] + a["h"],
-                               b["x"] + b["w"] / 2, b["y"], edge_pen)
+            ln = self.scene.addLine(
+                a["x"] + a["w"] / 2, a["y"] + a["h"],
+                b["x"] + b["w"] / 2, b["y"],
+                rail_pen if (a.get("is_template") and b.get("is_template"))
+                else edge_pen)
+            ln.setZValue(-10)
 
         for n in nodes:
             self._add_card(n)
@@ -1904,12 +1946,16 @@ class JobCanvas(QWidget):
         # (that lit all four Extract cards amber at once).
         act = self._active or {}
         running = card_is_running(n, act)
-        fill, border = _CARD_STYLE.get("running" if running else n["status"],
-                                       _CARD_STYLE["ghost"])
+        if n.get("is_template"):
+            fill, border = (_TEMPLATE_DONE if n.get("on_disk") else _TEMPLATE_STYLE)
+        else:
+            fill, border = _CARD_STYLE.get("running" if running else n["status"],
+                                           _CARD_STYLE["ghost"])
         item = _CardItem(n, self)
         item.setBrush(QBrush(QColor(fill)))
         pen = QPen(QColor(border))
-        pen.setWidth(3 if running else 2)   # running gets a heavier outline too
+        pen.setWidth(1 if n.get("is_template")
+                     else (3 if running else 2))   # running gets a heavier outline
         if ghost or orphan:                 # un-built / found-on-disk look dashed
             pen.setStyle(Qt.PenStyle.DashLine)
         item.setPen(pen)
@@ -3107,6 +3153,8 @@ class Tomogration(QMainWindow):
                                lambda: self._view_picks_tm_vis(node))
             menu.addAction("Details", lambda: self._show_card_details(node))
             menu.addSeparator()
+            menu.addAction("⟲ Clear job (delete its results, keep the card)",
+                           lambda: self._clear_job(jid))
             menu.addAction("Hide (remove from view)", lambda: self._hide_card(node))
             menu.addAction("Delete folder from disk…",
                            lambda: self._delete_orphan_dir(orph))
@@ -3699,6 +3747,78 @@ class Tomogration(QMainWindow):
             return
         self._log(f"killing {job_id}…", "warning")
         self.runner.terminate()
+
+    def _clear_job(self, job_id):
+        """Delete a job's RESULTS but keep the card, so it can be reconfigured and
+        re-run in place.
+
+        Between "delete the job, keep the files" and "delete both" there was no way
+        to say "this attempt was wrong, try again" — you deleted the card, lost the
+        parameters and the wiring, and rebuilt it from scratch. Worse, re-running
+        over a half-written output directory mixes two attempts' files, which is how
+        a failed export leaves a star that looks complete.
+
+        Uses the same resolver as the permanent delete, so it can never touch raw
+        data or a shared directory.
+        """
+        store = load_jobs(self.project_root)
+        job = (store.get("jobs", {}) or {}).get(job_id)
+        if not job:
+            return
+        if job.get("status") == "running":
+            QMessageBox.warning(self, "Job is running",
+                                f"{job_id} is still running — kill it first.")
+            return
+        spec = self._stage_by_id(job.get("stage_id")) or {}
+        targets, skipped = job_delete_targets(
+            self.project_root, job_id, job.get("stage_id"),
+            job.get("params", {}), spec.get("output_params"))
+
+        detail = ("\n".join(f"    {r}/   ({self._dir_size_human(r)})" for r in targets)
+                  if targets else "    (nothing on disk yet)")
+        note = ("\n\nNOT touched (protected or shared):\n    "
+                + "\n    ".join(skipped)) if skipped else ""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Clear this job's results?")
+        box.setText(f"Clear {job_id} · {job.get('label', '')}?")
+        box.setInformativeText(
+            f"The CARD stays, with its parameters and wiring intact, and goes back to "
+            f"'queued' so you can change it and run it again.\n\n"
+            f"These results are REMOVED FROM DISK — this cannot be undone:\n\n"
+            f"{detail}{note}")
+        yes = box.addButton("Clear results", QMessageBox.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(box.buttons()[-1])
+        box.exec()
+        if box.clickedButton() is not yes:
+            return
+
+        removed = []
+        for rel in targets:
+            try:
+                shutil.rmtree(Path(self.project_root) / rel)
+                removed.append(rel)
+            except OSError as e:
+                self._log(f"could not clear {rel}: {e}", "fail")
+        # Back to a fresh queued job. The command is dropped so it is rebuilt from
+        # whatever the parameters say NEXT time — keeping a stale command is how an
+        # edited card re-runs the old one.
+        update_job(self.project_root, job_id, status="queued", exit_code=None,
+                   started=None, finished=None, summary={}, command="",
+                   interrupted=False)
+        self._log(f"Cleared {job_id}"
+                  + (f" — removed {', '.join(removed)}" if removed
+                     else " (nothing was on disk)")
+                  + ". It is queued again; adjust its parameters and run it.",
+                  "warning")
+        self._invalidate_orphans()
+        self._invalidate_status()
+        self._refresh_queue()
+        self._refresh_canvas()
+        if spec:
+            self._builder_job_id = job_id      # edit THIS card, don't clone it
+            self._select_stage(spec)
 
     def _delete_job_permanent(self, job_id):
         """Delete the job record AND its output files. Irreversible.

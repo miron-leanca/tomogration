@@ -564,6 +564,13 @@ def summarize_job(stage_id, job_dir):
 # ===========================================================================
 CARD_W, CARD_H = 210, 92          # card box size (scene units)
 GAP_X, GAP_Y = 44, 30             # spacing between forks (x) and stages (y)
+# The DEFAULT PIPELINE lives in a fixed rail down the left edge — one template card
+# per stage, always present, never movable. Real jobs start to the right of it and
+# can never be placed inside it, so the template stays readable however tangled the
+# actual project gets. Before this, a stage's template card and a user-placed job
+# card competed for the same coordinates.
+RAIL_GUTTER = 72
+RAIL_W = CARD_W + RAIL_GUTTER     # x at which the working canvas begins
 
 
 # MCore's only report of what a refinement achieved is one stdout line at the very
@@ -1143,21 +1150,27 @@ def canvas_layout(store, orphans=None, stage_status=None, hidden=None):
         title = stage_title(sid, spec.get("label", sid))
         js = by_stage.get(sid, [])
         cols_used[sid] = max(1, len(js))
+
+        # THE TEMPLATE RAIL. One card per stage, ALWAYS — this is the default
+        # pipeline as a printed reference, not a placeholder for missing work. It
+        # used to appear only for stages with no jobs, so the template dissolved
+        # exactly as a project got complicated. Pinned to x=0 and never movable;
+        # real jobs start at RAIL_W so the two can never overlap.
+        nid = f"ghost:{sid}"
+        # Its output may already exist on disk (run from the terminal, or a ▶ Run
+        # trunk pass). If so, mark it done rather than 'not built'.
+        st = stage_status.get(sid)
+        done = bool(st and st[0])
+        tmpl = {"id": nid, "stage_id": sid, "label": spec.get("label", sid),
+                "title": title, "group": spec.get("group", ""), "row": row, "col": 0,
+                "x": 0, "y": y, "w": CARD_W, "h": CARD_H,
+                "is_ghost": True, "is_template": True, "on_disk": done,
+                "n_jobs": len(js),
+                "disk_label": (st[1] if done else "") or "",
+                "status": "completed" if done else "ghost", "summary": {}}
+        nodes.append(tmpl)
+        index[nid] = tmpl
         if not js:
-            nid = f"ghost:{sid}"
-            # No job for this stage — but its output may already exist on disk (run
-            # from the terminal / a ▶ Run trunk pass). If so, show it as COMPLETED
-            # (green, still dashed = 'not a tracked job'), not a grey 'not built'.
-            st = stage_status.get(sid)
-            done = bool(st and st[0])
-            n = {"id": nid, "stage_id": sid, "label": spec.get("label", sid),
-                 "title": title, "group": spec.get("group", ""), "row": row, "col": 0,
-                 "x": 0, "y": y, "w": CARD_W, "h": CARD_H,
-                 "is_ghost": True, "on_disk": done,
-                 "disk_label": (st[1] if done else "") or "",
-                 "status": "completed" if done else "ghost", "summary": {}}
-            nodes.append(n)
-            index[nid] = n
             row_first[sid] = nid
         else:
             for col, (jid, job) in enumerate(js):
@@ -1186,7 +1199,7 @@ def canvas_layout(store, orphans=None, stage_status=None, hidden=None):
                      "label": job.get("label", spec.get("label", sid)),
                      "title": node_title,
                      "group": spec.get("group", ""), "row": row, "col": col,
-                     "x": col * (CARD_W + GAP_X), "y": y,
+                     "x": RAIL_W + col * (CARD_W + GAP_X), "y": y,
                      "w": CARD_W, "h": CARD_H, "is_ghost": False,
                      "status": job.get("status", "queued"),
                      "summary": job.get("summary", {}) or {}}
@@ -1203,10 +1216,13 @@ def canvas_layout(store, orphans=None, stage_status=None, hidden=None):
     placed = store.get("positions", {}) if isinstance(store, dict) else {}
     for nid, xy in (placed or {}).items():
         n = index.get(nid)
-        if not n or not isinstance(xy, (list, tuple)) or len(xy) != 2:
-            continue
+        if not n or n.get("is_template") or not isinstance(xy, (list, tuple)) \
+                or len(xy) != 2:
+            continue          # the rail is fixed furniture; it is never placed
         try:
-            n["x"], n["y"] = float(xy[0]), float(xy[1])
+            # Clamped out of the rail: a position stored before the rail existed
+            # would otherwise drop a real job straight onto the template.
+            n["x"], n["y"] = max(float(xy[0]), float(RAIL_W)), float(xy[1])
             n["moved"] = True
         except (TypeError, ValueError):
             continue
@@ -1218,13 +1234,14 @@ def canvas_layout(store, orphans=None, stage_status=None, hidden=None):
         if parent:
             edges.append((parent, jid))
             has_real_parent.add(job.get("stage_id"))
+    # The rail is its own chain, top to bottom: the default pipeline read as a
+    # flow. It links template->template ONLY. Previously these trunk edges hopped
+    # between whichever card happened to be first in each row, so lines shot from
+    # the template across the canvas into unrelated jobs and back — which is most
+    # of what made the graph unreadable once a project had real branches.
     order = [s["id"] for s in STAGES]
     for a, b in zip(order, order[1:]):
-        if b in has_real_parent:          # already linked via a real parent edge
-            continue
-        src, dst = row_first.get(a), row_first.get(b)
-        if src and dst:
-            edges.append((src, dst))
+        edges.append((f"ghost:{a}", f"ghost:{b}"))
 
     # Orphan cards: on-disk pick sets made outside the app, placed after the real
     # jobs in their stage's row and flagged so the UI can offer 'Adopt as job'.

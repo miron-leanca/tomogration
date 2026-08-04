@@ -156,11 +156,23 @@ with tempfile.TemporaryDirectory() as tmp:
     check("position survives a round-trip through the store",
           jobs.load_jobs(root)["positions"]["J1"] == [640.0, 1234.5])
 
-    # Ghost ids are stable, so an unrun stage can be placed too.
+    # The template rail is FIXED FURNITURE — the reference the working canvas is
+    # read against. A stored position for it is ignored rather than honoured, so it
+    # cannot be dragged out of pipeline order (by a user or by a stale coordinate).
     jobs.set_card_position(root, "ghost:ts_stack", 10.0, 20.0)
     idx = {n["id"]: n for n in jobs.canvas_layout(jobs.load_jobs(root))[0]}
-    check("a ghost card can be placed", (idx["ghost:ts_stack"]["x"],
-                                         idx["ghost:ts_stack"]["y"]) == (10.0, 20.0))
+    check("a template card cannot be placed",
+          (idx["ghost:ts_stack"]["x"], idx["ghost:ts_stack"]["y"]) != (10.0, 20.0))
+    check("it stays in the rail", idx["ghost:ts_stack"]["x"] == 0)
+
+    # A position stored before the rail existed would drop a real job onto the
+    # template; it is clamped out instead.
+    jobs.set_card_position(root, "J2", 5.0, 400.0)
+    idx = {n["id"]: n for n in jobs.canvas_layout(jobs.load_jobs(root))[0]}
+    check("a job placed inside the rail is clamped out",
+          idx["J2"]["x"] == jobs.RAIL_W)
+    check("its row is respected", idx["J2"]["y"] == 400.0)
+    jobs.clear_card_positions(root, "J2")
 
     jobs.clear_card_positions(root, "J1")
     idx = {n["id"]: n for n in jobs.canvas_layout(jobs.load_jobs(root))[0]}
@@ -168,6 +180,9 @@ with tempfile.TemporaryDirectory() as tmp:
           (idx["J1"]["x"], idx["J1"]["y"]) == auto["J1"])
     check("and leaves the others alone",
           jobs.load_jobs(root)["positions"].get("ghost:ts_stack") == [10.0, 20.0])
+    check("(stored, but ignored at layout time)",
+          {n["id"]: n for n in jobs.canvas_layout(jobs.load_jobs(root))[0]}
+          ["ghost:ts_stack"]["x"] == 0)
 
     jobs.clear_card_positions(root)
     check("clearing all empties the map", jobs.load_jobs(root)["positions"] == {})
