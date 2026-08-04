@@ -1175,7 +1175,10 @@ def canvas_layout(store, orphans=None, stage_status=None, hidden=None):
                 "is_ghost": True, "is_template": True, "on_disk": done,
                 "n_jobs": len(js),
                 "disk_label": (st[1] if done else "") or "",
-                "status": "completed" if done else "ghost", "summary": {}}
+                # ALWAYS 'ghost'. A template that reports 'completed' is a template
+                # that every status-driven code path — colouring, the details pane,
+                # the running check — treats as a finished job.
+                "status": "ghost", "summary": {}}
         nodes.append(tmpl)
         index[nid] = tmpl
         if not js:

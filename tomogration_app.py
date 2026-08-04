@@ -1277,7 +1277,6 @@ class ProcessingHistory(QDialog):
 # The template rail reads as a PRINTED REFERENCE, not as work: cool slate on a
 # darker ground, so a real job of any status is unmistakably brighter than it.
 _TEMPLATE_STYLE = ("#151b22", "#33414f")
-_TEMPLATE_DONE = ("#16211b", "#2f5c43")     # its stage's output exists on disk
 _RAIL_BG = "#0b0f13"
 _RAIL_HATCH = "#16202a"
 _RAIL_EDGE = "#22303c"
@@ -2004,7 +2003,11 @@ class JobCanvas(QWidget):
         act = self._active or {}
         running = card_is_running(n, act)
         if n.get("is_template"):
-            fill, border = (_TEMPLATE_DONE if n.get("on_disk") else _TEMPLATE_STYLE)
+            # NEVER a job colour. The rail is the pipeline reference; the moment a
+            # template card goes green it reads as completed work, and the eye stops
+            # being able to tell the template from the jobs beside it. Everything
+            # that has actually run is a card to the RIGHT of the separator.
+            fill, border = _TEMPLATE_STYLE
         else:
             fill, border = _CARD_STYLE.get("running" if running else n["status"],
                                            _CARD_STYLE["ghost"])
@@ -2032,24 +2035,39 @@ class JobCanvas(QWidget):
 
         inner_w = n["w"] - 22                           # text column width (11px margins)
         # group tag (tiny) · friendly title (bold) · raw command · status/summary
-        text(n.get("group", ""), 11, 6, 8, "#6f6f6f", maxw=inner_w)
+        is_tmpl = n.get("is_template", False)
+        text(n.get("group", ""), 11, 6, 8, "#4c5a68" if is_tmpl else "#6f6f6f",
+             maxw=inner_w)
         text(n.get("title", n["label"]), 11, 20, 11,
-             "#8a8a8a" if ghost else "#ececec", bold=True, maxw=inner_w)
-        text(n.get("subtitle", n["stage_id"]), 11, 40, 8, "#6f6f6f", maxw=inner_w)
-        if running:
+             "#7b8b9a" if is_tmpl else ("#8a8a8a" if ghost else "#ececec"),
+             bold=True, maxw=inner_w)
+        text(n.get("subtitle", n["stage_id"]), 11, 40, 8,
+             "#4c5a68" if is_tmpl else "#6f6f6f", maxw=inner_w)
+        template = n.get("is_template", False)
+        if template:
+            # A template has no state of its own — it is one step of the default
+            # pipeline. What it CAN say is whether this project has any work for
+            # that step, which is navigation, not status, so it stays slate.
+            k = n.get("n_jobs", 0)
+            sub = (f"{k} job{'s' if k != 1 else ''} →" if k
+                   else ("output on disk" if n.get("on_disk") else "no jobs yet"))
+            sub_colour = "#5c7186" if (k or n.get("on_disk")) else "#3f4d5a"
+        elif running:
             prog = act.get("progress", "")
             sub = "▶ running" + (f" · {prog}" if prog else "")
+            sub_colour = "#f0a92a"
         elif n.get("on_disk"):                 # completed outside the app (on disk)
             sub = "✓ done (on disk)" + (
                 f" · {n['disk_label']}" if n.get("disk_label") else "")
+            sub_colour = "#27ae60"
         elif ghost:
             sub = "not built"
+            sub_colour = "#7d7d7d"
         else:
             st = summary_text(n["summary"])
             sub = n["status"] + (f" · {st}" if st else "")
-        text(sub, 11, 56, 9,
-             "#f0a92a" if running else ("#27ae60" if n.get("on_disk") else "#7d7d7d"),
-             maxw=inner_w)
+            sub_colour = "#7d7d7d"
+        text(sub, 11, 56, 9, sub_colour, maxw=inner_w)
         if not ghost and not orphan:
             text(n["id"], n["w"] - 42, 6, 8, "#9ec5ff")
 

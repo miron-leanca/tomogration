@@ -259,6 +259,18 @@ with tempfile.TemporaryDirectory() as tmp:
     check("every stage has exactly one template card",
           len([n for n in nodes if n.get("is_template")]) == len(app.STAGES))
     check("the template sits in the rail at x=0", tmpl_row[0]["x"] == 0)
+    # The rail carries NO job state. A template that reports 'completed' is one
+    # that every status-driven path — colouring, details, the running check —
+    # treats as finished work, and the eye can no longer tell template from job.
+    check("no template ever reports a job status",
+          all(n["status"] == "ghost" for n in nodes if n.get("is_template")))
+    check("templates are never 'completed'",
+          not any(n["status"] == "completed" for n in nodes if n.get("is_template")))
+    check("a template says how many jobs its stage has",
+          tmpl_row[0].get("n_jobs") == 2)
+    check("an unworked stage reports none",
+          next(n for n in nodes
+               if n.get("is_template") and n["stage_id"] == "aretomo")["n_jobs"] == 0)
     check("real jobs start right of the rail",
           all(n["x"] >= app.RAIL_W for n in nodes if not n.get("is_template")))
     check("so no job can overlap the template",
