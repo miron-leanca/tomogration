@@ -3230,21 +3230,29 @@ class Tomogration(QMainWindow):
         subdirs = spec.get("output_subdirs") or []
         if not (keys or subdirs) or not isinstance(root, (str, os.PathLike)):
             return True
-        cands = [str((params or {}).get(k, "") or "").strip().rstrip("/") for k in keys]
-        # Stages that write into a fixed subfolder of the PROCESSING folder named in
-        # the .settings file (ts_reconstruct -> reconstruction/) name it nowhere in
-        # their params, so a re-run silently replaced tomograms that — once M has
-        # refined the alignments they were built from — cannot be rebuilt.
+        # A stage that writes into a fixed SUBFOLDER only endangers that subfolder.
+        # relion4_class3d's project_dir is a RELION project root holding
+        # matching_conv.star, subtomo/ and previous jobs — none of which it touches
+        # (it writes Class3D/job001/ and parks pipeline state aside). Warning about
+        # the container was a false alarm about the wrong files, and it drowned out
+        # the real risk. So when subdirs are declared, warn about THOSE, and drop the
+        # container they hang off.
+        cands, base = [], ""
         if subdirs:
-            proc = str((params or {}).get("output_processing", "") or "").strip()
-            if not proc:
+            key = spec.get("output_subdir_param") or "output_processing"
+            base = str((params or {}).get(key, "") or "").strip().rstrip("/")
+            if not base:
                 try:
-                    proc = settings_processing_dir(
+                    base = settings_processing_dir(
                         root, (params or {}).get(spec.get("settings_param", "settings"), ""))
                 except Exception:
-                    proc = ""
-            if proc:
-                cands += [f"{proc.rstrip('/')}/{s}" for s in subdirs]
+                    base = ""
+            if base:
+                cands += [f"{base}/{s}" for s in subdirs]
+        for k in keys:
+            rel = str((params or {}).get(k, "") or "").strip().rstrip("/")
+            if rel and rel != base:
+                cands.append(rel)
         hits = []
         for rel in cands:
             if not rel:

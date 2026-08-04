@@ -585,5 +585,51 @@ with tempfile.TemporaryDirectory() as td:
           w.current["job_id"] is None)
 
 
+# ---- the overwrite prompt must name what is actually at risk ----------------
+# relion4_class3d's project_dir is a RELION PROJECT ROOT: matching_conv.star,
+# subtomo/ and previous jobs live there and it touches none of them. It writes
+# Class3D/job001/ — a HARDCODED name, so a second run really does overwrite the
+# first. Warning about the container was a false alarm about the wrong files,
+# and it hid the real risk.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    w = Win(root)
+    asked = []
+    w._count_dir_entries = lambda rel, cap=3: (
+        1 if (root / rel).is_dir() and any((root / rel).iterdir()) else 0)
+
+    class Box:
+        Yes, No = 1, 0
+        @staticmethod
+        def question(parent, title, text, *a, **k):
+            asked.append(text)
+            return 1
+    app.QMessageBox = Box
+
+    spec = next(x for x in app.STAGES if x["id"] == "relion4_class3d")
+    proj = root / "relion4/picks_v5"
+    (proj / "subtomo").mkdir(parents=True)
+    (proj / "matching_conv.star").write_text("x")
+    params = {"project_dir": "relion4/picks_v5", "particles": "matching_conv.star"}
+
+    asked.clear()
+    ok = w._confirm_overwrite(spec, params)
+    check("a populated RELION project root alone raises no alarm",
+          ok is True and asked == [])
+
+    (proj / "Class3D" / "job001").mkdir(parents=True)
+    (proj / "Class3D" / "job001" / "run_it025_data.star").write_text("x")
+    asked.clear()
+    w._confirm_overwrite(spec, params)
+    check("an existing Class3D/job001 DOES raise the alarm", len(asked) == 1)
+    check("and the prompt names the job folder, not the project root",
+          "Class3D/job001" in asked[0])
+    check("the project root itself is not listed as at risk",
+          "    relion4/picks_v5/\n" not in asked[0])
+    check("the fixed job001 name is documented as the risk",
+          "job001 is a FIXED name" in spec["docs"]["pitfall"])
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

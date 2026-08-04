@@ -1235,7 +1235,15 @@ STAGES = [
         "group": "10. RELION 4", "id": "relion4_class3d",
         "label": "RELION 4: Class3D handoff",
         "base": "bash",
+        # project_dir is the RELION PROJECT ROOT — it holds matching_conv.star,
+        # subtomo/ and every previous job, none of which this touches. What it
+        # actually writes is Class3D/job001/, and that name is HARDCODED in the
+        # handoff script, so a second Class3D overwrites the first. Declaring the
+        # subfolder puts the overwrite warning on the thing genuinely at risk
+        # instead of on the container.
         "output_params": ["project_dir"],
+        "output_subdir_param": "project_dir",
+        "output_subdirs": ["Class3D/job001"],
         "params": [
             {"name": "script", "kind": "text", "flag": None,
              "default": _pkg_script("ml_relion4_handoff_warp_auto.sh"),
@@ -1282,7 +1290,7 @@ STAGES = [
             "effect": "Runs relion_refine_mpi from project_dir. Defaults to a DRY RUN — tick "
                       "EXECUTE to launch. RELION 4 is the GPU-native path on this VM class "
                       "(RELION 5's container CUDA can outrun the host driver → GPU error 35).",
-            "pitfall": "REF must be pre-scaled to OUTPUT_ANGPIX + BOX (the script does it via "
+            "pitfall": "Class3D/job001 is a FIXED name — running this twice in the same project_dir overwrites the previous classification (the particle star and subtomos are untouched). Use a different project_dir to keep both. REF must be pre-scaled to OUTPUT_ANGPIX + BOX (the script does it via "
                        "relion_image_handler). OUTPUT_ANGPIX/BOX MUST match the export. Never "
                        "launch inside another RELION version's project (the script parks stale "
                        "pipeline files first).",
