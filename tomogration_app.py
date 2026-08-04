@@ -3228,8 +3228,6 @@ class Tomogration(QMainWindow):
                                lambda: self._view_picks_tm_vis(node))
             menu.addAction("Details", lambda: self._show_card_details(node))
             menu.addSeparator()
-            menu.addAction("⟲ Clear job (delete its results, keep the card)",
-                           lambda: self._clear_job(jid))
             menu.addAction("Hide (remove from view)", lambda: self._hide_card(node))
             menu.addAction("Delete folder from disk…",
                            lambda: self._delete_orphan_dir(orph))
@@ -3239,8 +3237,8 @@ class Tomogration(QMainWindow):
             menu.addAction("Build & run job", lambda: self._build_job(sid, run=True))
             menu.addAction("＋ Queue this job", lambda: self._queue_stage(sid))
             menu.addAction("Build (don't run)", lambda: self._build_job(sid, run=False))
-            menu.addAction("Open in job builder",
-                           lambda: self._open_job_in_builder(jid, sid))
+            # A template has no job to bind to — open the STAGE.
+            menu.addAction("Open in job builder", lambda: self._canvas_pick(sid))
         else:
             jid = node.get("id")
             status = node.get("status", "")
@@ -3272,8 +3270,11 @@ class Tomogration(QMainWindow):
                            lambda: self._set_job_parent(jid))
             menu.addAction("⌖ Reset this card's position",
                            lambda: self._reset_card_position(jid))
-            menu.addAction("Open in job builder", lambda: self._canvas_pick(sid))
+            menu.addAction("Open in job builder",
+                           lambda: self._open_job_in_builder(jid, sid))
             menu.addSeparator()
+            menu.addAction("⟲ Clear job — delete its results, back to Building",
+                           lambda: self._clear_job(jid))
             menu.addAction("Hide (remove from view)", lambda: self._hide_card(node))
             menu.addAction("Delete job (keep files)", lambda: self._delete_job(jid))
             menu.addAction("⚠ Delete job AND its files…",

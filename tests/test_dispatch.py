@@ -769,5 +769,92 @@ with tempfile.TemporaryDirectory() as td:
         app.QMessageBox = _orig_box
 
 
+# ---- every context-menu action must be able to run --------------------------
+# "Clear job" and the job-bound "Open in job builder" were both inserted into the
+# WRONG branch of _card_menu — the orphan and ghost branches, where `jid` is never
+# assigned. Nothing complained: a lambda resolves its names when CLICKED, so the
+# menu builds fine and the action raises NameError inside a Qt slot, which is the
+# same silent failure mode as the lost symbol that once made Run do nothing.
+# An unbound closure cell is detectable without invoking anything.
+class _RecMenu:
+    def __init__(self, *a, **k):
+        self.items = []          # [(label, callback)]
+        self.subs = []
+
+    def addAction(self, label, cb=None):
+        self.items.append((label, cb))
+        return object()
+
+    def addMenu(self, label):
+        m = _RecMenu()
+        self.subs.append((label, m))
+        return m
+
+    def addSeparator(self): pass
+    def exec(self, *a, **k): pass
+
+    def all_items(self):
+        out = list(self.items)
+        for _, m in self.subs:
+            out.extend(m.all_items())
+        return out
+
+
+def _unbound(cb):
+    """Names the callback closes over that are not actually bound."""
+    bad = []
+    for name, cell in zip(getattr(cb, "__code__", None).co_freevars if cb else (),
+                          cb.__closure__ or ()):
+        try:
+            cell.cell_contents
+        except ValueError:
+            bad.append(name)
+    return bad
+
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    w = Win(root)
+    _orig_menu = app.QMenu
+    app.QMenu = _RecMenu
+    try:
+        j = app.new_job(root, "ts_reconstruct", "Reconstruct", {"angpix": "10"})
+        app.update_job(root, j["id"], status="completed")
+        nodes, _ = app.canvas_layout(app.load_jobs(root))
+        job_node = next(n for n in nodes if n["id"] == j["id"])
+        ghost_node = next(n for n in nodes if n.get("is_template"))
+        orphan_node = {"id": None, "stage_id": "ts_template_match", "is_orphan": True,
+                       "is_ghost": False, "status": "orphan", "summary": {},
+                       "orphan": {"kind": "picks", "dir": "x", "suffix": "s"}}
+
+        menus = {}
+        for name, node in (("job", job_node), ("template", ghost_node),
+                           ("orphan", orphan_node)):
+            m = _RecMenu()
+            app.QMenu = lambda *a, _m=m, **k: _m
+            w._card_menu(node, None)
+            menus[name] = m
+            app.QMenu = _RecMenu
+
+        for name, m in menus.items():
+            for label, cb in m.all_items():
+                bad = _unbound(cb)
+                check(f"{name} menu · '{label}' can run", not bad)
+
+        labels = {k: [l for l, _ in m.all_items()] for k, m in menus.items()}
+        check("Clear job is offered on a real job",
+              any("Clear job" in l for l in labels["job"]))
+        check("Clear job is NOT on a template",
+              not any("Clear job" in l for l in labels["template"]))
+        check("Clear job is NOT on an orphan",
+              not any("Clear job" in l for l in labels["orphan"]))
+        check("every menu offers 'Open in job builder'",
+              all(any("Open in job builder" in l for l in labels[k])
+                  for k in ("job", "template")))
+    finally:
+        app.QMenu = _orig_menu
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
