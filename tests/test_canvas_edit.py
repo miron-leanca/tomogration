@@ -315,5 +315,46 @@ d2 = jobs.derive_child_params(
 check("a non-RELION pick set is left normalised",
       "coords_angpix" not in d2 and "normalized_coords" not in d2)
 
+
+# ---- "Build downstream from this" must actually build something ------------
+# It used to create NO card: it derived params, seeded the builder and stashed the
+# parent for a later build. The menu promises a card, so when none appeared the
+# natural move was to drag one in from the palette — which arrives blank, then
+# picked up the stashed parent. That is how a re-extract ran with no particle star
+# and died on its required positional argument.
+TOWARP = next(s for s in st.STAGES if s["id"] == "relion4_to_warp")
+SELPICK = next(s for s in st.STAGES if s["id"] == "relion4_select_picks")
+
+sel_params = {"source_star": "Select/job019/particles.star",
+              "override_suffix": "picks_v5", "tomo_angpix": "6.28"}
+d = jobs.derive_child_params("relion4_to_warp", "ts_template_match",
+                             sel_params, "jobs/J71")
+check("a selection card supplies the converter's particle star",
+      d["particles_star"] == "Select/job019/particles.star")
+check("and turns MODE C on", d["relion_coords"] is True)
+check("the derived converter passes its own validator",
+      "No particle star" not in TOWARP["validate"]({**d, "keep_all": True}))
+
+d = jobs.derive_child_params("relion4_select_picks", "ts_template_match",
+                             sel_params, "jobs/J71")
+check("select-good-class gets the star too",
+      d["class_star"] == "Select/job019/particles.star")
+
+# The blank card that actually shipped: no star at all.
+check("a blank converter is rejected before it runs",
+      "No particle star" in TOWARP["validate"]({"keep_all": True,
+                                                "relion_coords": True}))
+check("a blank class-select is rejected too",
+      "No classification star" in SELPICK["validate"]({"classes": "3"}))
+check("the star check fires FIRST, before the mode hints",
+      TOWARP["validate"]({}).startswith("⚠ No particle star"))
+
+# A template-match / crYOLO parent has no source_star and must not be treated as a
+# selection — there is no RELION star to hand over.
+check("a plain pick set supplies no particle star",
+      "particles_star" not in jobs.derive_child_params(
+          "relion4_to_warp", "ts_template_match",
+          {"override_suffix": "cryolo", "tomo_angpix": "12.56"}, "jobs/J10"))
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

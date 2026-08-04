@@ -3254,11 +3254,18 @@ class Tomogration(QMainWindow):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes
 
     def _build_downstream(self, parent_id, child_stage_id):
-        """Set up the next stage wired to a SPECIFIC parent job: derive the fiddly
-        bits (threshold's in_suffix, export's input_pattern) from the parent, seed
-        the job builder so they're pre-filled + editable, and remember the parent so
-        the next 'Build & run as job' wires to it (not just the newest upstream).
-        This is the 'rope J5's output into threshold_picks' shortcut."""
+        """CREATE the next job, wired to a SPECIFIC parent, and place it below it.
+
+        This used to create nothing at all: it derived the fiddly params, seeded the
+        job builder and stashed the parent for whenever the user next pressed
+        'Build & run as job'. The menu says "Build downstream from this", so a card
+        was expected on the canvas — and when none appeared the natural next move was
+        to drag one in from the palette, which arrives BLANK and then inherited the
+        stashed parent. That is how a re-extract ran with no particle star at all.
+
+        It now makes the job immediately: queued, wired, parameters derived, pinned
+        under its parent, and opened in the builder for editing.
+        """
         store = load_jobs(self.project_root)
         parent = store.get("jobs", {}).get(parent_id)
         spec = self._stage_by_id(child_stage_id)
@@ -3267,14 +3274,41 @@ class Tomogration(QMainWindow):
         derived = derive_child_params(child_stage_id, parent.get("stage_id"),
                                       parent.get("params", {}),
                                       parent.get("output_dir", ""))
+        params = self._effective_params(spec)
+        params.update(derived)
         self._param_store.setdefault(child_stage_id, {}).update(derived)
         self._persist_param_store()
-        self._pending_parent[child_stage_id] = parent_id
-        self._select_stage(spec)          # form shows the derived values, editable
-        hint = f" in_suffix={derived['in_suffix']}" if "in_suffix" in derived else \
-               (f" input_pattern={derived['input_pattern']}" if "input_pattern" in derived else "")
-        self._log(f"Set up {stage_title(child_stage_id, child_stage_id)} from "
-                  f"{parent_id}.{hint}  Adjust, then ▶ Build & run as job.", "ok")
+        # Explicit parent, so nothing is left stashed for a later, unrelated build.
+        self._pending_parent.pop(child_stage_id, None)
+        job = self._build_job(child_stage_id, params=params, run=False,
+                              parent=parent_id, confirm=False)
+        jid = (job or {}).get("id")
+        if not jid:
+            return
+        # Directly below the parent, so the branch reads top-to-bottom.
+        try:
+            px, py = self._node_position(parent_id)
+            set_card_position(self.project_root, jid, px, py + CARD_H + GAP_Y)
+        except Exception:
+            pass
+        bits = [f"{k}={v}" for k, v in derived.items() if v not in ("", None, False)]
+        self._log(f"Built {jid} · {stage_title(child_stage_id, child_stage_id)} "
+                  f"from {parent_id}"
+                  + (f"  ({', '.join(bits[:3])})" if bits else "")
+                  + ".  Check its parameters, then right-click ▸ Run.", "ok")
+        self._refresh_canvas()
+        self._select_stage(spec)
+
+    def _node_position(self, node_id):
+        """Where a card currently sits on the canvas, honouring any user placement."""
+        store = load_jobs(self.project_root)
+        pos = (store.get("positions") or {}).get(str(node_id))
+        if isinstance(pos, (list, tuple)) and len(pos) == 2:
+            return float(pos[0]), float(pos[1])
+        for n in canvas_layout(store, [], {}, set(store.get("hidden", [])))[0]:
+            if n["id"] == node_id:
+                return float(n["x"]), float(n["y"])
+        return 0.0, 0.0
 
     def _toggle_card_lock(self, checked):
         """View-menu mirror of the canvas toolbar's lock button (one state, two

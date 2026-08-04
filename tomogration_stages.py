@@ -1356,6 +1356,10 @@ STAGES = [
              "writes nothing). Turn ON to actually write the filtered pick stars."},
         ],
         "validate": lambda v: (
+            # Required positional — see the note on relion4_to_warp.
+            "⚠ No classification star. This card needs the Class3D run_itNNN_data.star "
+            "to read class assignments from."
+            if not str(v.get("class_star", "")).strip() else
             "⚠ Type the good class number(s) into 'classes' (e.g. 3, or 1,3). Run a dry "
             "run first (EXECUTE off) to see the class populations."
             if not str(v.get("classes", "")).strip() else
@@ -1480,6 +1484,14 @@ STAGES = [
              "Turn ON to actually write the pick stars."},
         ],
         "validate": lambda v: (
+            # The star is a REQUIRED POSITIONAL argument. Blank means the script dies
+            # with "the following arguments are required: class_star" after the job
+            # has already been queued and run — which is exactly what a card created
+            # with template defaults does.
+            "⚠ No particle star. This card needs the RELION star to re-extract from "
+            "(e.g. Select/job019/particles.star). Build it downstream of a Subset "
+            "selection card and it is filled in for you."
+            if not str(v.get("particles_star", "")).strip() else
             "⚠ Keep 'keep_all' ON here — this card re-extracts every particle in the input "
             "star. To pick specific classes instead, use the 'select good class' card."
             if not v.get("keep_all") else

@@ -375,6 +375,21 @@ def derive_child_params(child_stage, parent_stage, parent_params, parent_output_
             return {key: star} if star else {}
         return {}
 
+    # A promoted RELION SELECTION card. It rides the ts_template_match stage (so it
+    # lands in the Pick row) but is really a RELION job, and its star is in
+    # source_star. Without this, building a converter downstream of it derived
+    # NOTHING — the new card had no particle star, and the script died on its one
+    # required positional argument.
+    if parent_params.get("source_star") and child_stage in ("relion4_to_warp",
+                                                            "relion4_select_picks"):
+        key = "particles_star" if child_stage == "relion4_to_warp" else "class_star"
+        out = {key: parent_params["source_star"]}
+        if child_stage == "relion4_to_warp":
+            # These stars carry refined origins and Eulers, which is exactly what
+            # MODE C exists to use.
+            out["relion_coords"] = True
+        return out
+
     if child_stage == "threshold_picks" and parent_stage == "ts_template_match":
         return {"in_suffix": match_star_infix(parent_params)}
     # An export fed by a RELION→Warp converter. Every one of these five values was

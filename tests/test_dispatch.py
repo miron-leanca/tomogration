@@ -233,16 +233,24 @@ with tempfile.TemporaryDirectory() as tmp:
     dw._build_downstream(old_tm["id"], "threshold_picks")   # deliberately the OLDER
     check("downstream seeds derived in_suffix into the form store",
           dw._param_store["threshold_picks"]["in_suffix"] == "12.56Apx_v1")
-    check("downstream remembers the chosen parent",
-          dw._pending_parent.get("threshold_picks") == old_tm["id"])
     check("downstream opened the child in the builder", dw._selected == "threshold_picks")
-    # now the build should wire to the CHOSEN old_tm, overriding newest-upstream
-    dw.runner._busy = False
-    thr = dw._build_job("threshold_picks",
-                        params={"in_suffix": "12.56Apx_v1", "minimum": 3}, run=False)
-    st = app.load_jobs(root)["jobs"][thr["id"]]
+    # It must CREATE the card, not merely seed the builder: the menu says "Build
+    # downstream from this", and when nothing appeared users dragged in a blank card
+    # from the palette instead — which then ran with no parameters.
+    thr = [j for j in app.load_jobs(root)["jobs"].values()
+           if j["stage_id"] == "threshold_picks"]
+    check("downstream actually creates the card", len(thr) == 1)
+    st = thr[0]
     check("threshold wired to the chosen parent (not newest)",
           st["inputs"].get("processing") == old_tm["id"])
+    check("the created card carries the derived params",
+          st["params"].get("in_suffix") == "12.56Apx_v1")
+    check("it is queued, not run", st["status"] == "queued")
+    check("nothing is left stashed for a later unrelated build",
+          "threshold_picks" not in dw._pending_parent)
+    check("and it is placed below its parent",
+          app.load_jobs(root)["positions"].get(st["id"]) is not None)
+    dw.runner._busy = False
     check("pending parent consumed after build",
           "threshold_picks" not in dw._pending_parent)
 
