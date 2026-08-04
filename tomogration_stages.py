@@ -1273,6 +1273,19 @@ STAGES = [
              "default": "C1", "help": "Classify in C1; symmetrise only at Refine3D."},
             {"name": "NCLASSES", "kind": "env_int", "flag": "NCLASSES",
              "default": 4, "min": 1, "max": 12, "step": 1, "help": "Number of 3D classes (K)."},
+            {"name": "PAD", "kind": "env_int", "flag": "PAD",
+             "default": 1, "min": 1, "max": 2, "step": 1,
+             "help": "Fourier padding for the 3D reconstruction. Each iteration "
+             "back-projects the particles into a volume and Fourier-transforms it; "
+             "PAD 2 first pads that volume to TWICE the box in every direction, "
+             "which suppresses interpolation artefacts at the cost of 8x the volume "
+             "memory (2³) — per class, per MPI follower. PAD 1 does no padding. "
+             "Classification only has to tell classes APART, so 1 is the normal "
+             "choice and is what you want here; save 2 for a final high-resolution "
+             "refinement where the interpolation accuracy actually shows. This was "
+             "hardcoded to 2 and segfaulted inside libcuda during Maximization "
+             "(box 112, 5 classes, 4 GPU followers) — if a run dies there, this is "
+             "the first thing to drop."},
             {"name": "GPUS", "kind": "env", "flag": "GPUS", "gpu_sep": ",",
              "default": "0,1,2,3", "help": "GPU ids for RELION (idle ones — check util%). "
              "Any separator; the script converts to RELION's colon form (0:1:2:3) so each "

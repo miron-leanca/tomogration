@@ -33,6 +33,14 @@
 #   GPUS            GPU ids, any separator                (default: 0,1,2,3; MPI = n+1;
 #                   space/comma/colon all accepted -> RELION gets the colon form
 #                   0:1:2:3 so each MPI follower uses its OWN GPU, not all on GPU 0)
+#   PAD             Fourier padding factor, 1 or 2        (default: 1)
+#                   2 = pad the reconstruction volume to 2x the box before the
+#                   Fourier transform. That reduces interpolation artefacts, and
+#                   costs ~8x the volume memory (2^3). 1 = no padding.
+#                   Classification only needs to tell classes APART, so 1 is the
+#                   normal choice; keep 2 for a final high-resolution refinement.
+#                   Was hardcoded to 2, which segfaulted in libcuda during
+#                   Maximization on EML45 (box 112, K 5, 4 GPU followers).
 #   ITER            classification iterations            (default: 25)
 #   INI_LOWPASS     initial reference low-pass (Å)       (default: 45)
 #   RELION_EXTRA    appended verbatim to relion_refine_mpi
@@ -55,6 +63,10 @@ SYMMETRY="${SYMMETRY:-C1}"
 NCLASSES="${NCLASSES:-4}"
 GPUS="${GPUS:-0,1,2,3}"
 ITER="${ITER:-25}"
+PAD="${PAD:-1}"
+case "$PAD" in 1|2) ;; *)
+    echo "ERROR: PAD must be 1 or 2 (got '$PAD'). 1 = no padding, 2 = pad to 2x box." >&2
+    exit 2;; esac
 INI_LOWPASS="${INI_LOWPASS:-45}"
 
 mode=$([ $EXECUTE -eq 1 ] && echo EXECUTE || echo DRY-RUN)
@@ -131,7 +143,7 @@ REFINE=(mpirun -n "$MPI" relion_refine_mpi
         --ref "$(basename "$REF_SCALED")"
         --o "Class3D/job001/run"
         --ini_high "$INI_LOWPASS"
-        --pad 2 --ctf
+        --pad "$PAD" --ctf
         --iter "$ITER" --tau2_fudge 4
         --K "$NCLASSES"
         --sym "$SYMMETRY"

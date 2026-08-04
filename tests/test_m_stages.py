@@ -253,7 +253,34 @@ def main():
           "ONE AT A TIME" in core2["validate"](
               dict(v2, refine_stageangles=True, refine_mag=True)))
 
+
+    # ---- Class3D padding is a knob, not a hardcoded 2 -----------------------
+    # --pad 2 pads the reconstruction volume to twice the box before the Fourier
+    # transform: better interpolation, 8x the volume memory (2 cubed) per class
+    # per MPI follower. It was hardcoded, and segfaulted inside libcuda during
+    # Maximization on box 112 with 5 classes and 4 GPU followers.
+    C3D = next(x for x in st.STAGES if x["id"] == "relion4_class3d")
+    pad = next((q for q in C3D["params"] if q["name"] == "PAD"), None)
+    check("Class3D exposes PAD", pad is not None)
+    check("PAD defaults to 1 (classification only sorts classes)",
+          pad["default"] == 1)
+    check("PAD is bounded to 1 or 2", pad["min"] == 1 and pad["max"] == 2)
+    check("PAD reaches the script as an env var", pad["flag"] == "PAD")
+    check("its help explains the memory cost", "memory" in pad["help"].lower())
+
+    cmd = st.build_command(C3D, {**st.stage_defaults(C3D), "PAD": 2})
+    check("PAD is emitted as an environment assignment", "PAD=2" in cmd)
+    check("the default is emitted too",
+          "PAD=1" in st.build_command(C3D, st.stage_defaults(C3D)))
+
+    _sh = (REPO / "ml_relion4_handoff_warp_auto.sh").read_text()
+    check("the script no longer hardcodes --pad 2", "--pad 2 " not in _sh)
+    check("the script takes PAD from the environment", '--pad "$PAD"' in _sh)
+    check("with a default", 'PAD="${PAD:-1}"' in _sh)
+    check("and rejects anything but 1 or 2", "PAD must be 1 or 2" in _sh)
+
     print(f"\n{passed} passed, {failed} failed")
+
     return 1 if failed else 0
 
 
