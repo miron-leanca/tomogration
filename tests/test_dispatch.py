@@ -91,11 +91,18 @@ class Win(app.Tomogration):
         pass
 
     def _select_stage(self, spec):
-        # Mirrors the real one's binding handshake: consume _builder_job_id into
-        # self.current so the run button can be wired to an existing card.
+        # Mirrors the real one's binding handshake. STICKY, not one-shot: the
+        # binding is re-validated on every rebuild and survives while the form is
+        # still on that job's stage and the job can still change.
         self._selected = spec["id"]
-        bound = getattr(self, "_builder_job_id", None)
-        self._builder_job_id = None
+        want = getattr(self, "_builder_job_id", None)
+        bound = None
+        if want:
+            j = (app.load_jobs(self.project_root).get("jobs") or {}).get(want)
+            if (j and j.get("status") in ("building", "queued")
+                    and j.get("stage_id") == spec["id"]):
+                bound = want
+        self._builder_job_id = bound
         self.current = {"spec": spec, "job_id": bound, "manual": False}
 
     def _persist_param_store(self):
@@ -530,12 +537,16 @@ with tempfile.TemporaryDirectory() as td:
           after[0]["params"].get("out_dir") == "picks_v6")
     check("and its command was resolved", bool(after[0].get("command")))
 
-    # A stage opened any other way stays stage-scoped: no binding, so its run
-    # button still builds a new job.
-    spec = next(x for x in app.STAGES if x["id"] == "relion4_to_warp")
-    w._select_stage_real = app.Tomogration._select_stage
-    check("no binding leaks to the next stage opened",
-          getattr(w, "_builder_job_id", None) is None)
+    # The binding is STICKY but re-validated, so it lapses on its own rather than
+    # being eagerly cleared. Once the bound job is running it is no longer editable,
+    # and the next rebuild of that stage must drop it.
+    spec_tw = next(x for x in app.STAGES if x["id"] == "relion4_to_warp")
+    w._select_stage(spec_tw)
+    check("a running job's binding lapses on rebuild",
+          w.current["job_id"] is None)
+    # And it never leaks to an unrelated stage.
+    w._select_stage(next(x for x in app.STAGES if x["id"] == "ts_ctf"))
+    check("no binding leaks to another stage", w.current["job_id"] is None)
 
 
 # ---- editing a QUEUED card must not clone it --------------------------------
@@ -950,6 +961,54 @@ with tempfile.TemporaryDirectory() as td:
     check("a job with no params is flagged as empty", w._showing_job["empty"] is True)
     check("and does not silently show the previous values as its own",
           w._showing_job["id"] == bare["id"])
+
+
+# ---- the builder binding must survive a form rebuild ------------------------
+# It used to be consumed by _select_stage, so ANY of the fifteen things that
+# rebuild the form dropped it: the button quietly changed from "Run J2" back to
+# "Run", and the next click built a second job instead of running the one on
+# screen. That is exactly what happened to J2 in the EML46 project.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    w = Win(root)
+    w._param_store = {}
+    spec = next(x for x in app.STAGES if x["id"] == "ts_export_particles")
+
+    j = app.new_job(root, "ts_export_particles", "Export", {"box": "48"})
+    w._open_job_in_builder(j["id"], "ts_export_particles")
+    check("bound after opening", w.current["job_id"] == j["id"])
+
+    # The stage sidebar, the details pane and a project-root refresh all do exactly
+    # this — re-render the SAME stage.
+    w._select_stage(spec)
+    check("binding survives a rebuild of the same stage",
+          w.current["job_id"] == j["id"])
+    w._select_stage(spec)
+    check("and a second one", w.current["job_id"] == j["id"])
+
+    # Moving to a DIFFERENT stage must drop it — that form is not editing this job.
+    w._select_stage(next(x for x in app.STAGES if x["id"] == "ts_ctf"))
+    check("switching stage drops the binding", w.current["job_id"] is None)
+    w._select_stage(spec)
+    check("and it does not come back", w.current["job_id"] is None)
+
+    # A job that starts running is no longer editable, so the binding must lapse
+    # rather than let the form write into a live run.
+    w._open_job_in_builder(j["id"], "ts_export_particles")
+    check("re-bound", w.current["job_id"] == j["id"])
+    app.update_job(root, j["id"], status="running")
+    w._select_stage(spec)
+    check("a job that starts running drops the binding",
+          w.current["job_id"] is None)
+
+    # And the click-time path refuses too, even if a stale id reached it.
+    w._values = lambda: {"box": "999"}
+    w._confirm_validator = lambda sp, pa: True
+    w._confirm_overwrite = lambda sp, pa: True
+    w._save_and_run_job(j["id"])
+    check("saving into a running job is refused",
+          app.load_jobs(root)["jobs"][j["id"]]["params"]["box"] == "48")
 
 
 print(f"\n{passed} passed, {failed} failed")

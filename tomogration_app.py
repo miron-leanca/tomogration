@@ -3562,6 +3562,13 @@ class Tomogration(QMainWindow):
             if spec:
                 self._build_job(spec["id"], run=True)
             return
+        # A job can start running, or be cleared, while the form sits open. Writing
+        # the form into a job that is no longer yours to edit would be worse than
+        # refusing.
+        if job.get("status") not in ("building", "queued"):
+            self._log(f"{job_id} is {job.get('status')} — not editable from the "
+                      f"builder. Use its card to re-run it.", "warn")
+            return
         values = self._values()
         if not self._confirm_validator(spec, values):
             return
@@ -4450,12 +4457,18 @@ class Tomogration(QMainWindow):
         self._log(f"Cleared {len(pend)} queued job(s).", "info")
 
     def _select_stage(self, spec):
-        # Which queued job (if any) this form is editing. Consumed here so any other
-        # route into the builder is plain stage-scoped editing, as before. Only a
-        # QUEUED job binds: a finished one is re-run from its own card.
+        # Which editable job (if any) this form is acting on.
+        #
+        # STICKY, not one-shot. It used to be consumed here, so ANY of the fifteen
+        # things that rebuild the form — the stage sidebar, the details pane, a
+        # project-root refresh, a docs re-render — silently dropped it. The button
+        # quietly changed from "Run J2" back to "Run", and the next click built a
+        # second job instead of running the one on screen. Re-validated on every
+        # rebuild instead: it survives while the form is still on that job's stage
+        # and the job can still change, and is dropped the moment either stops
+        # being true.
         bound_job = None
         want = getattr(self, "_builder_job_id", None)
-        self._builder_job_id = None
         if want:
             try:
                 j = (load_jobs(self.project_root).get("jobs") or {}).get(want)
@@ -4464,6 +4477,7 @@ class Tomogration(QMainWindow):
                     bound_job = want
             except Exception:
                 bound_job = None
+        self._builder_job_id = bound_job
 
         # Highlight the active stage so selection is visible.
         for sid, b in getattr(self, "stage_buttons", {}).items():
