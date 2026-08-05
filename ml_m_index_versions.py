@@ -44,6 +44,38 @@ from pathlib import Path
 INFO_NAME = "_tomogration_version.txt"
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 
+# Every version folder holds a <name>.species file, and it records what the round
+# ACHIEVED and what it came FROM:
+#     <Param Name="GlobalResolution" Value="4.295464" />
+#     <Param Name="PreviousVersion"  Value="kKTyRA7g" />
+# That is authoritative and survives regardless of how the run was launched, so it
+# beats both the job store (which only knows runs made through tomogration) and the
+# write-time match (which is an inference). Read it first, fall back to the job.
+_SPECIES_PARAM = re.compile(r'Name="([^"]+)"\s+Value="([^"]*)"')
+
+
+def species_info(d):
+    """{param: value} from the .species file in a version folder, or {}."""
+    try:
+        hits = sorted(Path(d).glob("*.species"))
+    except OSError:
+        return {}
+    if not hits:
+        return {}
+    try:
+        text = hits[0].read_text(errors="replace")
+    except OSError:
+        return {}
+    return dict(_SPECIES_PARAM.findall(text))
+
+
+def species_resolution(d):
+    """The round's global resolution in A, or None."""
+    try:
+        return float(species_info(d).get("GlobalResolution", ""))
+    except (TypeError, ValueError):
+        return None
+
 # The refinement switches that actually distinguish one MCore round from the next.
 # Everything else (paths, device list, port) is noise when you are comparing runs.
 REFINE_FLAGS = re.compile(
@@ -169,13 +201,20 @@ def refine_flags(command):
     return " ".join(m.group(0) for m in REFINE_FLAGS.finditer(command or ""))
 
 
-def describe(job):
+def describe(job, res=None):
+    """Job id + resolution. The resolution comes from the .species file when it is
+    there, so a round run outside tomogration still reports one."""
+    bits = []
+    if res is not None:
+        bits.append(f"{res:.2f} Å")
     if not job:
-        return "(not run from tomogration)"
-    bits = [job["id"]]
-    res = job["summary"].get("resolution_A")
-    if res:
-        bits.append(f"{res} Å")
+        bits.append("(not run from tomogration)")
+        return "  ".join(bits)
+    bits.insert(0, job["id"])
+    if res is None:
+        jr = job["summary"].get("resolution_A")
+        if jr:
+            bits.append(f"{jr} Å")
     if job["status"] and job["status"] != "completed":
         bits.append(job["status"])
     return "  ".join(bits)
@@ -218,12 +257,16 @@ def main(argv=None):
     rows = []
     for d in version_dirs:
         when = folder_time(d)
+        info = species_info(d)
         rows.append({
             "dir": d,
             "when": when,
             "size": folder_size(d),
             "species": d.parents[1].name,
             "job": match_job(when, jobs),
+            "res": species_resolution(d),
+            "prev": info.get("PreviousVersion", ""),
+            "angpix": info.get("PixelSize", ""),
         })
     rows.sort(key=lambda r: (r["when"] or datetime.datetime.min))
 
@@ -235,7 +278,7 @@ def main(argv=None):
             print(f"  {'when':<17} {'folder':<14} {'size':>7}  job")
         when = r["when"].strftime("%Y-%m-%d %H:%M") if r["when"] else "unknown"
         print(f"  {when:<17} {r['dir'].name:<14} "
-              f"{human(r['size']):>7}  {describe(r['job'])}")
+              f"{human(r['size']):>7}  {describe(r['job'], r.get('res'))}")
         job = r["job"]
         if job:
             flags = refine_flags(job["command"])
@@ -271,6 +314,12 @@ def main(argv=None):
             f"written        : {when}",
             f"size           : {human(r['size'])}",
         ]
+        if r.get("res") is not None:
+            lines.append(f"resolution     : {r['res']:.2f} A   (from the .species file)")
+        if r.get("prev"):
+            lines.append(f"previous round : {r['prev']}")
+        if r.get("angpix"):
+            lines.append(f"pixel size     : {r['angpix']} A/px")
         if job:
             lines += [
                 f"tomogration job: {job['id']}  ({job['status']})",

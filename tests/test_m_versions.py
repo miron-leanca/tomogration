@@ -474,5 +474,60 @@ check("the V100 deconv warning still wins",
 check("ts_reconstruct does not duplicate the auto-wired output flag",
       not any(p.get("flag") == "--output_processing" for p in REC["params"]))
 
+
+# ---- the .species file is the authoritative record --------------------------
+# Every version folder holds a <name>.species recording GlobalResolution and
+# PreviousVersion. That beats both the job store (which only knows runs launched
+# through tomogration) and the write-time match (an inference) — a round run from
+# a terminal still reports its resolution and its place in the chain.
+SPECIES = """<?xml version="1.0" encoding="utf-8"?>
+<Species>
+	<Param Name="GUID" Value="30cc83ca-927a-42af-8ae1-ff42333a709c" />
+	<Param Name="GlobalResolution" Value="4.295464" />
+	<Param Name="PixelSize" Value="1.57" />
+	<Param Name="PreviousVersion" Value="kKTyRA7g" />
+	<Param Name="Version" Value="cabUJnEw" />
+</Species>
+"""
+
+with tempfile.TemporaryDirectory() as tmp:
+    v = Path(tmp) / "m/species/spike_abc/versions/cabUJnEw"
+    v.mkdir(parents=True)
+    (v / "spike.species").write_text(SPECIES)
+    (v / "spike_filtsharp.mrc").write_bytes(b"x" * 64)
+
+    info = idx.species_info(v)
+    check("species params parsed", info.get("GlobalResolution") == "4.295464")
+    check("the version chain is readable", info.get("PreviousVersion") == "kKTyRA7g")
+    check("pixel size too", info.get("PixelSize") == "1.57")
+    check("resolution as a float", abs(idx.species_resolution(v) - 4.295464) < 1e-6)
+
+    empty = Path(tmp) / "nospecies"
+    empty.mkdir()
+    check("a folder with no .species yields no params", idx.species_info(empty) == {})
+    check("and no resolution", idx.species_resolution(empty) is None)
+
+    (Path(tmp) / "junk").mkdir()
+    (Path(tmp) / "junk" / "x.species").write_text("not xml at all")
+    check("an unparseable .species does not raise",
+          idx.species_resolution(Path(tmp) / "junk") is None)
+
+# The resolution must reach the printed table for a round with NO matching job —
+# that is the case the job store cannot answer at all.
+with tempfile.TemporaryDirectory() as tmp:
+    root = build(tmp, versions=[("spike_abc", "cabUJnEw", 100)], jobs_list=[])
+    v = root / "m/species/spike_abc/versions/cabUJnEw"
+    (v / "spike.species").write_text(SPECIES)
+    code, out = run(root)
+    check("an unmatched round still reports its resolution", "4.30 Å" in out)
+    check("and is still flagged as not run from tomogration",
+          "not run from tomogration" in out)
+
+    code, out = run(root, "--write")
+    body = (v / idx.INFO_NAME).read_text()
+    check("the label records the resolution", "4.30 A" in body)
+    check("the label records the previous round", "kKTyRA7g" in body)
+    check("and the pixel size", "1.57" in body)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
