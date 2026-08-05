@@ -2150,6 +2150,10 @@ class Tomogration(QMainWindow):
         # builder is stage-scoped, so pressing its run button after "Build
         # downstream" created a SECOND job instead of running the one just made.
         self._builder_job_id = None
+        # One-shot: describes a FINISHED job whose parameters the form is showing,
+        # so the banner can say "this is history" rather than letting it read as
+        # something you are about to run.
+        self._showing_job = None
         # Debounce disk writes: a single-shot timer flushes _param_store to config
         # ~0.6s after the last edit (so typing doesn't hammer the JSON).
         self._persist_timer = QTimer(self)
@@ -3476,22 +3480,37 @@ class Tomogration(QMainWindow):
         self._select_stage(spec)
 
     def _open_job_in_builder(self, job_id, stage_id):
-        """Open a card in the builder, bound to it when it is still QUEUED.
+        """Open a card in the builder, showing THAT job's parameters.
 
-        Binding only happened right after a card was created, so reopening a queued
-        card later left the builder stage-scoped — and its buttons then made a
-        duplicate card instead of editing the one on screen. A queued job is exactly
-        the case where the form should be editing THAT job.
+        Two separate things, which used to be conflated:
+
+          SHOWING a past run's parameters is the whole point of clicking a card —
+          "what did J9 actually run?" is the commonest question anyone asks of a
+          finished job. Clicking a completed card used to leave the form on the
+          last-used values, so an export from July displayed this week's v6 paths.
+
+          BINDING the run buttons to that job is only right while it can still
+          change. A completed job is history; running from here creates a NEW job,
+          and the buttons keep saying so.
         """
         spec = self._stage_by_id(stage_id)
         if not spec:
             return
         job = (load_jobs(self.project_root).get("jobs") or {}).get(job_id) or {}
-        if job.get("status") in ("building", "queued"):
-            self._param_store[stage_id] = dict(job.get("params") or {})
+        kept, dropped, _missing = params_for_builder(spec, job.get("params"))
+        if kept:
+            self._param_store[stage_id] = kept
             self._persist_param_store()
-            self._exact_params_for = stage_id     # show its values, not the defaults
+            self._exact_params_for = stage_id     # its values, not today's defaults
+        editable = job.get("status") in ("building", "queued")
+        if editable:
             self._builder_job_id = job_id
+        # Rendered as a banner over the form, so nobody edits a finished run
+        # believing they are changing it.
+        self._showing_job = None if editable else {
+            "id": job_id, "status": job.get("status", ""),
+            "when": job.get("finished") or job.get("started") or job.get("created", ""),
+            "empty": not kept, "dropped": dropped}
         self._select_stage(spec)
 
     def _save_queued_job(self, job_id):
@@ -4464,6 +4483,30 @@ class Tomogration(QMainWindow):
         title = QLabel(spec["label"])
         title.setStyleSheet("font-size:15px;font-weight:600;")
         self.form_box.addWidget(title)
+
+        # Showing a FINISHED job's recorded parameters. Say so loudly: the form is
+        # otherwise indistinguishable from one you are about to run, and the values
+        # in it belong to a run that already happened.
+        shown = getattr(self, "_showing_job", None)
+        self._showing_job = None                      # one-shot, like bound_job
+        if shown and shown.get("id"):
+            if shown.get("empty"):
+                msg = (f"⌛ {shown['id']} recorded no parameters — it predates the job "
+                       f"model, or was adopted from disk. Its command is on the card.")
+            else:
+                msg = (f"⌛ Showing {shown['id']}'s recorded parameters "
+                       f"({shown.get('status', '')}"
+                       + (f", {shown['when']}" if shown.get("when") else "") + "). "
+                       f"This is history — running from here creates a NEW job.")
+            if shown.get("dropped"):
+                msg += (f"  Ignored {len(shown['dropped'])} parameter(s) this stage no "
+                        f"longer has: {', '.join(shown['dropped'])}.")
+            banner = QLabel(msg)
+            banner.setWordWrap(True)
+            banner.setStyleSheet(
+                "background:#2c2440;border:1px solid #8b6ed6;border-radius:3px;"
+                "padding:5px 8px;color:#c9b8f0;font-size:11px;")
+            self.form_box.addWidget(banner)
 
         # Interactive tool stage: launch a window instead of running a command.
         if spec.get("tool"):

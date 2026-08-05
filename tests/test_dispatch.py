@@ -63,6 +63,12 @@ class Win(app.Tomogration):
         self._attempt = 1
         self._failed_file = None
         self.logs = []
+        # The real __init__ creates these. Without them the stubbed Qt base answers
+        # getattr() with a permissive object rather than None, so "is None" checks
+        # silently pass on garbage.
+        self._builder_job_id = None
+        self._showing_job = None
+        self._exact_params_for = None
 
     # GUI-only helpers stubbed to no-ops / capture
     def _log(self, msg, level="info"):
@@ -883,11 +889,21 @@ with tempfile.TemporaryDirectory() as td:
     w._canvas_pick(dict(node, status="queued"))
     check("clicking a Queued card binds too", w.current["job_id"] == b["id"])
 
-    # A finished card must NOT bind: re-running it is its own card action, and
-    # silently overwriting a completed job's parameters would be worse.
-    app.update_job(root, b["id"], status="completed")
+    # A finished card must NOT bind — re-running it is its own card action, and
+    # silently overwriting a completed job's parameters would be worse. But it MUST
+    # still SHOW what that job ran: "what did J9 actually use?" is the commonest
+    # question asked of a finished job, and the form used to answer it with this
+    # week's values.
+    app.update_job(root, b["id"], status="completed",
+                   params={"box": "80", "output_angpix": "6.28"},
+                   finished="2026-07-16 09:20:00")
+    w._param_store["ts_export_particles"] = {"box": "112"}     # "today's" values
     w._canvas_pick(dict(node, status="completed"))
     check("clicking a Completed card does not bind", w.current["job_id"] is None)
+    check("but it DOES show that job's recorded parameters",
+          w._param_store["ts_export_particles"]["box"] == "80")
+    check("today's values are replaced, not merged",
+          w._param_store["ts_export_particles"].get("output_angpix") == "6.28")
 
     # Templates and discovered cards have no job behind them at all.
     tmpl = next(n for n in nodes if n.get("is_template"))
@@ -899,6 +915,41 @@ with tempfile.TemporaryDirectory() as td:
     w._canvas_pick("ts_ctf")
     check("a bare stage id still opens the stage", w._selected == "ts_ctf")
     check("and binds nothing", w.current["job_id"] is None)
+
+
+# ---- reviewing a past run says it is a past run -----------------------------
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    w = Win(root)
+    w._param_store = {}
+    old_job = app.new_job(root, "ts_export_particles", "Export",
+                          {"box": "80", "output_angpix": "6.28"})
+    app.update_job(root, old_job["id"], status="completed",
+                   finished="2026-07-16 09:20:00")
+    w._open_job_in_builder(old_job["id"], "ts_export_particles")
+    check("a finished job is flagged for the history banner",
+          w._showing_job is not None and w._showing_job["id"] == old_job["id"])
+    check("the banner carries its status", w._showing_job["status"] == "completed")
+    check("and when it ran", w._showing_job["when"] == "2026-07-16 09:20:00")
+    check("its params are loaded", w._param_store["ts_export_particles"]["box"] == "80")
+    check("and the buttons are NOT bound to it", w.current["job_id"] is None)
+
+    # An editable job gets the binding and NO banner — it is not history.
+    q = app.new_job(root, "ts_export_particles", "Export", {"box": "112"})
+    w._open_job_in_builder(q["id"], "ts_export_particles")
+    check("a building job binds instead", w.current["job_id"] == q["id"])
+    check("and shows no history banner", w._showing_job is None)
+
+    # A job with no recorded params (adopted from disk, or pre-job-model) must say
+    # so rather than showing someone else's values as if they were its own.
+    bare = app.new_job(root, "ts_export_particles", "old", {})
+    app.update_job(root, bare["id"], status="completed")
+    w._param_store["ts_export_particles"] = {"box": "999"}
+    w._open_job_in_builder(bare["id"], "ts_export_particles")
+    check("a job with no params is flagged as empty", w._showing_job["empty"] is True)
+    check("and does not silently show the previous values as its own",
+          w._showing_job["id"] == bare["id"])
 
 
 print(f"\n{passed} passed, {failed} failed")
