@@ -699,6 +699,13 @@ def folder_time(d):
     try:
         with os.scandir(d) as it:
             for e in it:
+                # Ignore anything WE wrote. ml_m_index_versions drops a label file
+                # into every version folder, which then becomes the newest entry —
+                # so running it once reset every folder's apparent write time to
+                # "just now" and unmatched every round from its job. The tool
+                # destroyed the evidence it exists to preserve.
+                if e.name.startswith("_tomogration"):
+                    continue
                 try:
                     t = e.stat().st_mtime
                 except OSError:

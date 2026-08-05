@@ -529,5 +529,76 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the label records the previous round", "kKTyRA7g" in body)
     check("and the pixel size", "1.57" in body)
 
+
+# ---- --write must not destroy the timestamps it records ---------------------
+# folder_time takes the newest entry in a version folder, and the label file WE
+# write becomes the newest entry. Running the indexer once therefore reset every
+# folder's apparent write time to "just now" and unmatched every round from its
+# job — the tool destroyed the evidence it exists to preserve.
+with tempfile.TemporaryDirectory() as tmp:
+    root = build(tmp, versions=[("spike_abc", "aaa", 3600),
+                                ("spike_abc", "bbb", 1800)],
+                 jobs_list=[{"id": "J1", "started": ago_ts(3700),
+                             "finished": ago_ts(3500), "command": "MCore --iter 0"},
+                            {"id": "J2", "started": ago_ts(1900),
+                             "finished": ago_ts(1700), "command": "MCore --iter 3"}])
+    code, before = run(root)
+    check("both rounds matched before --write",
+          "2 of 2 version folders matched" in before)
+
+    run(root, "--write")
+    code, after = run(root)
+    check("still matched AFTER --write", "2 of 2 version folders matched" in after)
+    check("J1 still identified", "J1" in after)
+    check("J2 still identified", "J2" in after)
+
+    # And a second --write must not drift either.
+    run(root, "--write")
+    code, again = run(root)
+    check("stable across repeated --write runs",
+          "2 of 2 version folders matched" in again)
+
+    v = root / "m/species/spike_abc/versions/aaa"
+    t_label = (v / idx.INFO_NAME).stat().st_mtime
+    t_map = (v / "map.mrc").stat().st_mtime
+    check("the label really is newer than the data (the trap)", t_label > t_map)
+    check("but folder_time ignores it",
+          abs(idx.folder_time(v).timestamp() - t_map) < 2)
+
+
+# ---- ordering follows M's own chain, not the clock --------------------------
+# PreviousVersion is exact and survives any amount of file touching; mtimes do
+# not. A round whose files are touched must not jump to the end of the sequence.
+def chained(tmp, chain):
+    """chain = [(folder, resolution, previous)] written as .species files."""
+    root = Path(tmp)
+    for i, (name, res, prev) in enumerate(chain):
+        d = root / "m/species/spike_abc/versions" / name
+        d.mkdir(parents=True)
+        (d / "map.mrc").write_bytes(b"x" * 64)
+        (d / "s.species").write_text(
+            f'<Species><Param Name="GlobalResolution" Value="{res}" />'
+            f'<Param Name="PreviousVersion" Value="{prev}" />'
+            f'<Param Name="Version" Value="{name}" /></Species>')
+        t = time.time() - (len(chain) - i) * 600
+        os.utime(d / "map.mrc", (t, t))
+    (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    return root
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = chained(tmp, [("first", "10.0", ""), ("mid", "6.9", "first"),
+                         ("last", "4.3", "mid")])
+    code, out = run(root)
+    check("chain order: first before mid", out.index("first") < out.index("mid"))
+    check("chain order: mid before last", out.index("mid") < out.index("last"))
+
+    # Touch the OLDEST round's files: by mtime it is now newest, but the chain is
+    # unchanged, so its position must not move.
+    now = time.time()
+    os.utime(root / "m/species/spike_abc/versions/first/map.mrc", (now, now))
+    code, out2 = run(root)
+    check("touching a file does not reorder the chain",
+          out2.index("first") < out2.index("mid") < out2.index("last"))
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

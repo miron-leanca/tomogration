@@ -103,6 +103,8 @@ except Exception:                                            # pragma: no cover
         newest = None
         try:
             for e in Path(d).iterdir():
+                if e.name.startswith("_tomogration"):
+                    continue          # our own label; see tomogration_jobs.folder_time
                 try:
                     t = e.stat().st_mtime
                 except OSError:
@@ -268,7 +270,31 @@ def main(argv=None):
             "prev": info.get("PreviousVersion", ""),
             "angpix": info.get("PixelSize", ""),
         })
-    rows.sort(key=lambda r: (r["when"] or datetime.datetime.min))
+    # ORDER. Prefer M's own chain: each .species records the PreviousVersion it was
+    # built from, which is exact and survives any amount of file touching. Fall back
+    # to write time only where the chain is broken (a version deleted, or a species
+    # rebuilt from scratch).
+    by_name = {r["dir"].name: r for r in rows}
+    prevs = {r["dir"].name: r.get("prev") or "" for r in rows}
+    ordered, seen = [], set()
+    roots = [n for n, pv in prevs.items() if pv not in by_name]
+    roots.sort(key=lambda n: by_name[n]["when"] or datetime.datetime.min)
+    nxt = {}
+    for n, pv in prevs.items():
+        if pv in by_name:
+            nxt.setdefault(pv, []).append(n)
+    for r0 in roots:
+        cur = r0
+        while cur and cur not in seen:
+            seen.add(cur)
+            ordered.append(by_name[cur])
+            kids = sorted(nxt.get(cur, []),
+                          key=lambda n: by_name[n]["when"] or datetime.datetime.min)
+            cur = kids[0] if kids else None
+    for r in sorted(rows, key=lambda r: (r["when"] or datetime.datetime.min)):
+        if r["dir"].name not in seen:
+            ordered.append(r)
+    rows = ordered
 
     species_seen = None
     for r in rows:
