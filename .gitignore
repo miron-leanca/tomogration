@@ -27,3 +27,6 @@ selected*/
 .DS_Store
 __pycache__/
 *.pyc
+
+# Internal working brief — stays local (names, institution, cluster paths)
+tomogration_brief.md
