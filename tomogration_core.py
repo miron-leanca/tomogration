@@ -59,6 +59,21 @@ _COUNTER_RE = re.compile(
 # RELION also redraws a bare ASCII progress bar with no counter at all.
 _FISH_RE = re.compile(r'^[.\s]*~~\(,_,')
 
+# tqdm (IsoNet 2, membrain, anything using it):
+#     "Predicting Tomogram 34:  77%|███████▋  | 721/940 [00:20<00:06, 36.41it/s]"
+# The description plus the bar is 41 characters before the counter — one over
+# the prose guard below — so the generic rule called it prose and 35 lines a
+# SECOND went into the log. '<digits>%|' is not something prose does, so match
+# it directly and key on the description, which is the part that stays put
+# while everything after it changes every tick.
+_TQDM_RE = re.compile(r"^(?P<pre>.*?)\s*\d{1,3}%\|")
+
+
+# "no particles found in Position004.tomostar, skipping..." and the same shape
+# from other WarpTools steps. Anchored on both ends so a line that merely
+# mentions skipping something is not swallowed.
+_SKIP_RE = re.compile(r"^\s*(?:no |nothing )\S.*\bskipping\b\W*$", re.I)
+
 
 def progress_key(line):
     """A stable identity for a self-updating progress line, or None.
@@ -72,6 +87,16 @@ def progress_key(line):
         return None
     if _FISH_RE.match(line):
         return "~fish~"
+    # Per-item skips. Exporting picks made on 4 tomograms walks all 72 in the
+    # settings file and announces every one it skips, so 68 identical lines
+    # buried "Found 18431 particles in 4 tilt series" and the run read as a
+    # failure when it had worked. They are state, not history: one updating
+    # line in the status strip says the same thing.
+    if _SKIP_RE.match(line):
+        return "~skip~"
+    m = _TQDM_RE.match(line)
+    if m:
+        return m.group("pre").strip().rstrip(":").strip() or "~bar~"
     m = _COUNTER_RE.match(line)
     if not m:
         return None

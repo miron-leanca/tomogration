@@ -405,6 +405,8 @@ def build_html():
 
     seen = set()
     for stage in app.STAGES:
+        if stage.get("legacy"):          # retired: kept for old cards, not documented
+            continue
         g = stage.get("group", "")
         if g not in seen:
             seen.add(g)

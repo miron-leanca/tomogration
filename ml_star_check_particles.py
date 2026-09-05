@@ -84,7 +84,8 @@ def check_reference(ref, star_box, star_apx, roots):
           f"  reference box = {box}   angpix = ?")
     print(f"  particles  box = {star_box}   angpix = {star_apx}")
     ok = True
-    if star_box and box and int(box) != int(star_box):
+    # int(float(...)): RELION writes some integer fields as '64.000000'.
+    if star_box and box and int(float(box)) != int(float(star_box)):
         print(f"  ✗ BOX MISMATCH ({box} vs {star_box}). RELION 4 will NOT rescale it. "
               f"Rescale first:")
         print(f"      relion_image_handler --i {path} --angpix {apx or '<ref apx>'} "
@@ -189,9 +190,16 @@ def main():
 
     keep_flags, n_rows, missing = [], 0, []
     per_tomo_missing, per_tomo_total = Counter(), Counter()
+    in_particles = True
     for i in range(data_start, len(lines)):
         s = lines[i].strip()
+        if s.startswith("data_"):
+            # A later block's rows are NOT particle rows — never prune them.
+            in_particles = False
         if not s or s.startswith("#") or s.startswith("data_") or s.startswith("loop_"):
+            keep_flags.append((i, True))
+            continue
+        if not in_particles:
             keep_flags.append((i, True))
             continue
         f = s.split()

@@ -112,10 +112,17 @@ def main():
     print(f"Flip Y:        {args.flip_y}")
     print("===================================================================")
 
-    coords_files = sorted(glob.glob(os.path.join(coords_dir, f"*_{apx}Apx.coords")))
+    # '*_<apx>Apx*.coords', not '*_<apx>Apx.coords': crYOLO names its output
+    # after the volume it picked on, so picking on an IsoNet-filtered tomogram
+    # gives Position003_12.56Apx_isonet2.coords. Anchoring on the end of the
+    # name forced people to bulk-rename every file before this would run — a
+    # step that is easy to get wrong and loses which volume the picks came from.
+    coords_files = sorted(glob.glob(os.path.join(coords_dir, f"*_{apx}Apx*.coords")))
     if not coords_files:
-        sys.exit(f"ERROR: no '*_{apx}Apx.coords' files in {coords_dir} "
-                 f"(is --apx right? crYOLO writes COORDS/<stem>_{apx}Apx.coords)")
+        sys.exit(f"ERROR: no '*_{apx}Apx*.coords' files in {coords_dir} "
+                 f"(is --apx right? crYOLO writes COORDS/<stem>_{apx}Apx.coords, "
+                 f"or <stem>_{apx}Apx_<variant>.coords when it picked on a "
+                 f"filtered tomogram)")
 
     hdr = ("\ndata_\n\nloop_\n"
            "_rlnCoordinateX #1\n_rlnCoordinateY #2\n_rlnCoordinateZ #3\n"
@@ -128,12 +135,34 @@ def main():
     total = 0
     written = 0
     for cf in coords_files:
-        stem = os.path.basename(cf).split(f"_{apx}Apx")[0]        # Position046
-        mrc = os.path.join(recon_dir, f"{stem}_{apx}Apx.mrc")
+        base = os.path.basename(cf)
+        stem = base.split(f"_{apx}Apx")[0]                        # Position046
+        # The variant the picks were made on, if any: '_isonet2' from
+        # Position003_12.56Apx_isonet2.coords. Only used to find the matching
+        # volume and to say which one supplied the dimensions.
+        variant = base[len(stem):].rsplit(".coords", 1)[0][len(f"_{apx}Apx"):]
+        mrc = os.path.join(recon_dir, f"{stem}_{apx}Apx{variant}.mrc")
         if not os.path.exists(mrc):
-            print(f"!! {stem}: no reconstruction ({os.path.basename(mrc)}), skipping")
+            # Fall back to the plain reconstruction. Coordinates are normalised
+            # by the volume's DIMENSIONS, and a filtered variant has the same
+            # grid as the tomogram it came from, so either answers correctly.
+            plain = os.path.join(recon_dir, f"{stem}_{apx}Apx.mrc")
+            if variant and os.path.exists(plain):
+                mrc = plain
+            else:
+                hits = sorted(glob.glob(
+                    os.path.join(recon_dir, f"{stem}_{apx}Apx*.mrc")))
+                if not hits:
+                    print(f"!! {stem}: no reconstruction "
+                          f"({os.path.basename(mrc)}), skipping")
+                    continue
+                mrc = hits[0]
+        try:
+            nx, ny, nz = mrc_dims(mrc)
+        except (OSError, struct.error) as e:
+            print(f"!! {stem}: unreadable reconstruction header "
+                  f"({os.path.basename(mrc)}: {e}), skipping")
             continue
-        nx, ny, nz = mrc_dims(mrc)
         tomo = f"{stem}.tomostar"
         rows = []
         for line in open(cf):

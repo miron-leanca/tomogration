@@ -137,15 +137,20 @@ def main():
         r4 = Path(tmp4)
         j = jobs.new_job(r4, "ts_export_particles", "e",
                          {"output_processing": "relion4/picks_{jobid}"})
-        (r4 / f"relion4/picks_{j['id']}").mkdir(parents=True)
+        # {jobid} resolves to the job's DIR NAME (J4_<slug>), not the bare id,
+        # so every {jobid}-derived path matches the named-dirs convention.
+        token = jobs.job_dir_token(j)
+        check("the dir token carries the stage slug",
+              token.startswith(j["id"] + "_"))
+        (r4 / f"relion4/picks_{token}").mkdir(parents=True)
         spec = next(x for x in jobs.STAGES if x["id"] == "ts_export_particles")
         t, _ = jobs.job_delete_targets(r4, j["id"], "ts_export_particles",
                                        j["params"], spec.get("output_params"),
                                        store=jobs.load_jobs(r4))
         check("{jobid} resolves in a delete target",
-              f"relion4/picks_{j['id']}" in t)
+              f"relion4/picks_{token}" in t)
         check("declared_output_dirs resolves it too",
-              f"relion4/picks_{j['id']}"
+              f"relion4/picks_{token}"
               in jobs.declared_output_dirs(r4, jobs.load_jobs(r4)["jobs"][j["id"]]))
 
     print(f"\n{passed} passed, {failed} failed")

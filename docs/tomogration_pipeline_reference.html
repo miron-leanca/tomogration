@@ -482,7 +482,7 @@ above. Both are fine; jobs are what you want when you're comparing variants.
     </div>
   </div>
 
-  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--angpix</span><span class="dflt">10</span> <span class="flag">--device_list</span><span class="dflt">0</span> <span class="flag">--perdevice</span><span class="dflt">1</span> <span class="flag">--deconv</span> <span class="flag">--dont_invert</span><span class="dflt">on</span></div>
+  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--angpix</span><span class="dflt">10</span> <span class="flag">--input_data</span> <span class="flag">--output_processing</span> <span class="flag">--device_list</span><span class="dflt">0</span> <span class="flag">--perdevice</span><span class="dflt">1</span> <span class="flag">--deconv</span> <span class="flag">--deconv_strength</span> <span class="flag">--deconv_falloff</span> <span class="flag">--deconv_highpass</span> <span class="flag">--halfmap_frames</span> <span class="flag">--halfmap_tilts</span> <span class="flag">--dont_overwrite</span> <span class="flag">--subvolume_size</span> <span class="flag">--subvolume_padding</span> <span class="flag">--keep_full_voxels</span> <span class="flag">--dont_invert</span> <span class="flag">--dont_normalize</span> <span class="flag">--dont_mask</span></div>
   <div class="notes"><b>Watch out</b><ul><li><apx> is the pixel size to TWO DECIMALS: --angpix 10 -> '10.00Apx'.</li><li>Leaving --angpix blank means NATIVE (1.57 A) -> ~260x the volume, tens of GB and ~40 min EACH. Use ~10 A for viewing/picking.</li><li>Needs WARP_FORCE_MRC_FLOAT32=1 for IMOD/3dmod to read the output.</li></ul></div>
 </section>
 <div class='group'>8. Pick</div>
@@ -512,7 +512,7 @@ above. Both are fine; jobs are what you want when you're comparing variants.
 <section class="card">
   <h2>Threshold picks</h2>
   <div class="cmd">WarpTools threshold_picks</div>
-  <p class="what-p">Keeps picks above a normalised score threshold; writes *&lt;out_suffix&gt;.star.</p>
+  <p class="what-p">Keeps picks whose figure of merit is at least `minimum`; writes *&lt;out_suffix&gt;.star.</p>
 
   <div class="io">
     <div class="col">
@@ -533,9 +533,9 @@ above. Both are fine; jobs are what you want when you're comparing variants.
 <div class='group'>9. Export</div>
 
 <section class="card">
-  <h2>Export particles</h2>
+  <h2>Extract particles (→ RELION)</h2>
   <div class="cmd">WarpTools ts_export_particles</div>
-  <p class="what-p">Extracts CTF-corrected particles into a RELION project dir — a particles star (+ optimisation_set.star for RELION 5).</p>
+  <p class="what-p">Extracts CTF-corrected particles into a RELION project dir — a particles star (+ optimisation_set.star for RELION 5). Two inputs, same extraction: a folder of pick stars (first extraction), or a RELION star (re-extraction of a selection at a finer pixel size).</p>
 
   <div class="io">
     <div class="col">
@@ -545,12 +545,12 @@ above. Both are fine; jobs are what you want when you're comparing variants.
     </div>
     <div class="col">
       <h3 class="writes">WRITES</h3>
-      <div class="dirs">dirs: relion4/warp</div>
+      <div class="dirs">dirs: relion4</div>
       <table><tr><td class="path">&lt;output_processing&gt;/subtomo/*.mrc</td><td class="what">ONE 3D SUBTOMOGRAM PER PARTICLE — this is the bulk (box^3 x 4 bytes each)</td></tr><tr><td class="path">&lt;output_star&gt;</td><td class="what">the particles STAR RELION will read, e.g. relion4/&lt;tag&gt;/matching.star</td></tr></table>
     </div>
   </div>
 
-  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--input_directory</span><span class="dflt">warp_tiltseries/matching</span> <span class="flag">--input_pattern</span><span class="dflt">*clean.star</span> <span class="flag">--output_star</span><span class="dflt">relion4/warp/matching.star</span> <span class="flag">--output_processing</span><span class="dflt">relion4/warp</span> <span class="flag">--output_angpix</span><span class="dflt">4</span> <span class="flag">--box</span><span class="dflt">64</span> <span class="flag">--diameter</span> <span class="flag">--normalized_coords</span><span class="dflt">on</span> <span class="flag">--relative_output_paths</span><span class="dflt">on</span></div>
+  <div class="flags"><b>Flags</b> <span class="flag">--settings</span><span class="dflt">warp_tiltseries.settings</span> <span class="flag">--input_star</span> <span class="flag">--input_directory</span><span class="dflt">warp_tiltseries/matching</span> <span class="flag">--input_pattern</span><span class="dflt">*clean.star</span> <span class="flag">--output_star</span><span class="dflt">relion4/{jobid}/matching.star</span> <span class="flag">--output_processing</span><span class="dflt">relion4/{jobid}</span> <span class="flag">--output_angpix</span><span class="dflt">4</span> <span class="flag">--box</span><span class="dflt">64</span> <span class="flag">--diameter</span> <span class="flag">--normalized_coords</span><span class="dflt">on</span> <span class="flag">--coords_angpix</span> <span class="flag">--relative_output_paths</span><span class="dflt">on</span> <span class="flag">--device_list</span> <span class="flag">--perdevice</span><span class="dflt">1</span></div>
   <div class="notes"><b>Watch out</b><ul><li>Needs EXACTLY ONE of --3d (RELION 4 subtomograms) or --2d (RELION 5 --tomo).</li><li>Image paths in the STAR are RELATIVE to --output_processing, so RELION MUST be launched from that directory or every path is wrong.</li><li>Size check: 578k particles at box 48 ~ 250 GB of subtomograms. Check disk before a big export.</li></ul></div>
 </section>
 <div class='group'>10. RELION 4</div>
@@ -563,12 +563,12 @@ above. Both are fine; jobs are what you want when you're comparing variants.
   <div class="io">
     <div class="col">
       <h3 class="reads">READS</h3>
-      <div class="dirs">dirs: relion4/warp</div>
+      <div class="dirs">dirs: relion4</div>
       <table><tr><td class="path">&lt;project_dir&gt;/&lt;starfile&gt;</td><td class="what">the Warp export STAR (e.g. matching.star)</td></tr></table>
     </div>
     <div class="col">
       <h3 class="writes">WRITES</h3>
-      <div class="dirs">dirs: relion4/warp</div>
+      <div class="dirs">dirs: relion4</div>
       <table><tr><td class="path">&lt;project_dir&gt;/&lt;stem&gt;_conv.star</td><td class="what">THE RELION-4-FORMAT PARTICLES STAR — this is what you feed RELION</td></tr><tr><td class="path">&lt;project_dir&gt;/random_subset_ref.mrc</td><td class="what">de-novo initial reference from NREF random particles, already at the particles&#x27; box + pixel size</td></tr></table>
     </div>
   </div>
@@ -578,25 +578,687 @@ above. Both are fine; jobs are what you want when you're comparing variants.
 </section>
 
 <section class="card">
-  <h2>RELION 4: Class3D</h2>
-  <div class="cmd">bash</div>
-  <p class="what-p">Hands the exported subtomograms to RELION 4 for 3D classification — asserts the export is complete, checks the launch-root path invariant, pre-scales the reference, cleans the project dir, and submits Class3D.</p>
+  <h2>RELION 4 result</h2>
+  <div class="cmd">(no command — an in-app tool)</div>
+  <p class="what-p">A finished RELION job adopted from disk so the workflow graph knows about it. Nothing runs — this is a handle on work already done.</p>
 
   <div class="io">
     <div class="col">
       <h3 class="reads">READS</h3>
-      <div class="dirs">dirs: relion4/warp</div>
-      <table><tr><td class="path">&lt;project_dir&gt;/&lt;particles&gt;</td><td class="what">the CONVERTED star (matching_conv.star)</td></tr><tr><td class="path">REF_MAP</td><td class="what">your reference .mrc (EMDB map or random_subset_ref.mrc)</td></tr></table>
+      <div class="dirs">dirs: relion4</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
     </div>
     <div class="col">
       <h3 class="writes">WRITES</h3>
-      <div class="dirs">dirs: relion4/warp</div>
-      <table><tr><td class="path">&lt;project_dir&gt;/Class3D/job001/run_itNNN_classNNN.mrc</td><td class="what">the class volumes</td></tr><tr><td class="path">&lt;project_dir&gt;/Class3D/job001/run_itNNN_data.star</td><td class="what">particle assignments</td></tr><tr><td class="path">&lt;project_dir&gt;/ref_&lt;angpix&gt;apx_box&lt;box&gt;.mrc</td><td class="what">the RE-SCALED reference</td></tr></table>
+      <div class="dirs">dirs: relion4</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
     </div>
   </div>
 
-  <div class="flags"><b>Flags</b> <span class="flag">RELION_MODULE</span><span class="dflt">relion/4.0.1</span> <span class="flag">REF_MAP</span> <span class="flag">REF_ANGPIX</span> <span class="flag">OUTPUT_ANGPIX</span><span class="dflt">4</span> <span class="flag">BOX</span><span class="dflt">64</span> <span class="flag">DIAMETER</span> <span class="flag">SYMMETRY</span><span class="dflt">C1</span> <span class="flag">NCLASSES</span><span class="dflt">4</span> <span class="flag">GPUS</span><span class="dflt">0,1,2,3</span> <span class="flag">--execute</span></div>
-  <div class="notes"><b>Watch out</b><ul><li>RELION 4 does NOT auto-rescale the reference. OUTPUT_ANGPIX and BOX must match the export, and the script pre-scales REF_MAP with relion_image_handler.</li><li>Runs relion_refine_mpi FROM <project_dir>. Do NOT also drive the same dir from the RELION GUI — pick one.</li><li>MPI = #GPUs + 1. GPUs are colon-separated for RELION (0:1:2:3).</li></ul></div>
+  
+  <div class="notes"><b>Watch out</b><ul><li>Re-running this card does nothing (it has no command). If the RELION job changes on disk, adopt it again.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>RELION 4: merge optics groups</h2>
+  <div class="cmd">python3</div>
+  <p class="what-p">Collapses a star&#x27;s optics groups into one, so RELION estimates the initial noise spectrum once instead of once per group.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">-o</span> <span class="flag">--cs</span><span class="dflt">2.7</span> <span class="flag">--report</span><span class="dflt">on</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>The per-series groups are REAL — M refined Cs per tilt series, and that precision is worth keeping for a FINAL refinement. Collapse for CLASSIFICATION, where it only costs time: feed the collapsed star to Class3D and the original to Refine3D.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>RELION 4: check particles exist</h2>
+  <div class="cmd">python3</div>
+  <p class="what-p">Checks every _rlnImageName in a particle STAR against the files on disk, reports how many are missing and which tomograms they are in, and can write a pruned STAR containing only the particles that exist.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--root</span> <span class="flag">--fix</span> <span class="flag">--out</span> <span class="flag">--ref</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>RELION validates particle files lazily, so a bad star fails HOURS into a refinement, not at the start. If whole tomograms are missing the export was interrupted or failed — re-export rather than prune, or you silently throw away good data.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>RELION 4: verify re-extraction</h2>
+  <div class="cmd">python3</div>
+  <p class="what-p">Pairs particles per tomogram between the RELION star you re-extracted from and the matching.star the export wrote, and checks the coordinates agree after recentring and rescaling.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--no-recenter</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Run this BEFORE any refinement. A wrong extraction is completely silent — RELION refines it happily for hours and yields noise. Pair with &#x27;check particles exist&#x27; (files present) — this one answers the different question of whether they are the RIGHT files.</li></ul></div>
+</section>
+<div class='group'>11. M refinement</div>
+
+<section class="card">
+  <h2>M: CTF pre-flight</h2>
+  <div class="cmd">python3</div>
+  <p class="what-p">Reads every tilt series&#x27; .xml and reports which ones carry no CTF estimate (CTFResolutionEstimate absent, empty or 0). Prints the exact ts_ctf command to fix the ones it finds.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--processing</span><span class="dflt">warp_tiltseries</span> <span class="flag">--tomostar</span><span class="dflt">tomostar</span> <span class="flag">--write-list</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Fixing the CTF is not enough on its own — a data source CACHES the tilt-series metadata when it is created, so an existing population will not see the new estimates. Re-run ts_ctf, then reset M and rebuild population → source → species.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>M: label version folders</h2>
+  <div class="cmd">python3</div>
+  <p class="what-p">Lists every m*/species/*/versions/* folder in the order it was written, with its size, the tomogration job that produced it, that job&#x27;s resolution, and the refinement flags that made it different from the round before.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--species</span> <span class="flag">--write</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Do NOT rename the folders yourself. The .species file and the population refer to version names internally, so a rename breaks the species silently. Runs launched from a terminal instead of tomogration have no job to match and are listed with their timestamp only.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>M: check / reset setup</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Finds every M artefact (all m*/ population dirs, their species and refinement_temp, and the &lt;name&gt;.source files beside the settings), reports whether each population&#x27;s data sources still resolve, and with EXECUTE moves them into a timestamped m_trash_&lt;date&gt;/ folder.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: m, warp_tiltseries</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: m</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--execute</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>The .source file is NOT in m/ — MTools writes it next to the processing settings (warp_tiltseries/&lt;name&gt;.source), which is why deleting m/ by hand leaves M half-configured. After a reset run create_population then create_source ONCE each, in that order: create_population on an existing population loads it instead of replacing it.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>M: kill stale processes</h2>
+  <div class="cmd">bash -lc &#x27;set +e; echo &quot;--- your Warp/M processes ---&quot;; pgrep -a -x -u $USER MCore; pgrep -a -x -u $USER WarpWorker; pgrep -x -u $USER MCore &gt;/dev/null || pgrep -x -u $USER WarpWorker &gt;/dev/null || echo &quot;  (none)&quot;; pkill -x -u $USER MCore; pkill -x -u $USER WarpWorker; sleep 2; pkill -9 -x -u $USER MCore; pkill -9 -x -u $USER WarpWorker; sleep 1; echo; echo &quot;--- after ---&quot;; pgrep -a -x -u $USER MCore || pgrep -a -x -u $USER WarpWorker || echo &quot;  all clear&quot;; echo; echo &quot;--- REST ports ---&quot;; ss -tlnp 2&gt;/dev/null | grep -E &quot;:143[0-9][0-9]&quot; || echo &quot;  free&quot;; echo; echo &quot;--- GPUs (other users included) ---&quot;; nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv 2&gt;/dev/null; exit 0&#x27;</div>
+  <p class="what-p">Kills YOUR leftover MCore/WarpWorker processes, then shows the REST port and what is still on the GPUs.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  
+  <div class="notes"><b>Watch out</b><ul><li>MCore&#x27;s REST port (14300) is a fixed global default, so on a shared machine a colleague&#x27;s run collides with yours even after cleanup. Always pass a private --port as well (e.g. 14372).</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>M: create population</h2>
+  <div class="cmd">MTools create_population</div>
+  <p class="what-p">Creates the M project (a &#x27;Population&#x27;). Run once per dataset.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: m</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--directory</span><span class="dflt">m</span> <span class="flag">--name</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Everything downstream references this exact path. Renaming it later means editing every M job.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>M: create data source</h2>
+  <div class="cmd">MTools create_source</div>
+  <p class="what-p">Registers your tilt series (and all their Warp metadata) with the population as a Data Source.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries, m</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: m</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--name</span> <span class="flag">--population</span><span class="dflt">m/{name}.population</span> <span class="flag">--processing_settings</span><span class="dflt">warp_tiltseries.settings</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Point it at the TILT-SERIES settings, not the frame-series one.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>M: create mask</h2>
+  <div class="cmd">relion_mask_create</div>
+  <p class="what-p">Makes the binary mask M needs around the particle. M expands it and adds a soft edge itself during refinement.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: relion4</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: m</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--i</span> <span class="flag">--o</span><span class="dflt">m/mask.mrc</span> <span class="flag">--ini_threshold</span><span class="dflt">0.04</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Do NOT pre-soften this mask — M does that. Always eyeball it in 3dmod before refining; a bad mask quietly wrecks the refinement.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>M: create species</h2>
+  <div class="cmd">MTools create_species</div>
+  <p class="what-p">Defines the thing being refined: the map, its mask, its symmetry and the refined particle poses from RELION.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: relion4, m</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: m</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--population</span> <span class="flag">--name</span> <span class="flag">--diameter</span> <span class="flag">--sym</span><span class="dflt">C1</span> <span class="flag">--temporal_samples</span><span class="dflt">1</span> <span class="flag">--half1</span> <span class="flag">--half2</span> <span class="flag">--mask</span><span class="dflt">m/mask.mrc</span> <span class="flag">--particles_relion</span> <span class="flag">--ignore_unmatched</span> <span class="flag">--angpix_resample</span> <span class="flag">--lowpass</span><span class="dflt">10</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Use the UNFILTERED half maps. Wrong symmetry or a bad mask here silently limits everything downstream. And create_species ADDS rather than replaces: re-running it (e.g. after remaking a mask) leaves the old species in the population too, so MCore refines both and reports two resolutions. Reset M to replace one.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>M: refine (MCore)</h2>
+  <div class="cmd">MCore</div>
+  <p class="what-p">The refinement engine. Run it repeatedly, adding one parameter per round and watching the resolution.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: m, warp_tiltseries</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: m</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--population</span> <span class="flag">--iter</span> <span class="flag">--min_particles</span><span class="dflt">20</span> <span class="flag">--refine_imagewarp</span> <span class="flag">--refine_particles</span> <span class="flag">--ctf_defocus</span> <span class="flag">--ctf_defocusexhaustive</span> <span class="flag">--refine_stageangles</span> <span class="flag">--refine_mag</span> <span class="flag">--ctf_cs</span> <span class="flag">--ctf_zernike3</span> <span class="flag">--ctf_zernike5</span> <span class="flag">--ctf_zernike2</span> <span class="flag">--ctf_zernike4</span> <span class="flag">--ctf_phase</span> <span class="flag">--refine_volumewarp</span> <span class="flag">--refine_tiltmovies</span> <span class="flag">--first_iteration_fraction</span> <span class="flag">--weight_threshold</span> <span class="flag">--ctf_minresolution</span> <span class="flag">--ctf_batch</span> <span class="flag">--cpu_memory</span> <span class="flag">--port</span> <span class="flag">--devicelist</span> <span class="flag">--perdevice_refine</span><span class="dflt">1</span> <span class="flag">--perdevice_preprocess</span> <span class="flag">--perdevice_postprocess</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>min_particles defaults to 1 in MCore — sparse series then crash the refinement (IndexOutOfRangeException). Add parameters ONE at a time: the resolution number can improve while the map gets worse. Fork this card per round so you can compare and roll back.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>M: estimate weights</h2>
+  <div class="cmd">EstimateWeights</div>
+  <p class="what-p">Estimates exposure/dose weights, either per tilt series or per tilt averaged across series.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: m</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: m</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--population</span> <span class="flag">--source</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>This does not refine anything on its own — always follow it with an MCore run or nothing changes.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>M: resample trajectories</h2>
+  <div class="cmd">MTools resample_trajectories</div>
+  <p class="what-p">Increases how finely M models particle pose CHANGE through the tilt series (beam-induced motion).</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: m</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: m</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--population</span> <span class="flag">--species</span> <span class="flag">--samples</span><span class="dflt">2</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>More samples = more parameters per particle = easier overfitting. Raise only when the resolution has plateaued.</li></ul></div>
+</section>
+<div class='group'>12. Membrane</div>
+
+<section class="card">
+  <h2>Membrane: deconvolve</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">CTF-deconvolve reconstructed tomograms to boost membrane contrast before membrain-seg / IsoNet (tomo_preprocessing deconvolve, env membrainseg). The --df defocus is parsed automatically per tilt series from warp_tiltseries/&lt;series&gt;.xml (Warp stores µm → converted to Å ×10000) and echoed per series in the log.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries/reconstruction, warp_tiltseries</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/deconv</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">MB_TOMO_LIST</span> <span class="flag">MB_STRENGTH</span><span class="dflt">1.0</span> <span class="flag">MB_FALLOFF</span><span class="dflt">1.0</span> <span class="flag">MB_PIXEL_SIZE</span> <span class="flag">MB_KV</span><span class="dflt">300</span> <span class="flag">MB_CS</span><span class="dflt">2.7</span> <span class="flag">MB_AMPCON</span><span class="dflt">0.07</span> <span class="flag">MB_HP</span><span class="dflt">0.02</span> <span class="flag">MB_SKIP_LOWPASS</span> <span class="flag">MB_XML_DIR</span><span class="dflt">warp_tiltseries</span> <span class="flag">MB_CONDA_ENV</span><span class="dflt">membrainseg</span> <span class="flag">MB_FORCE</span><span class="dflt">0</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>NEVER deconvolve denoised or wedge-restored volumes — the wrapper refuses dirs tagged so in PROVENANCE.json. Outputs are for SEGMENTATION/PICKING only: particle extraction must reference the original reconstruction (each output folder is tagged extraction_allowed: false). Flags verified against the installed tool&#x27;s --help (membrainseg env, 2026-08-14); re-check after any env update — these tools have renamed flags before.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>IsoNet: train</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Train an IsoNet 1 missing-wedge model on a few representative tomograms (isonet.py: prepare_star → deconv → make_mask → extract → refine). Per-series defocus is injected into the star automatically from the Warp xml.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries/reconstruction, warp_tiltseries</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/isonet</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">ISO_TOMO_LIST</span> <span class="flag">ISO_GPU</span><span class="dflt">0</span> <span class="flag">ISO_PIXEL_SIZE</span><span class="dflt">12.56</span> <span class="flag">ISO_SUBTOMOS</span><span class="dflt">100</span> <span class="flag">ISO_ITER</span><span class="dflt">30</span> <span class="flag">ISO_CUBE</span><span class="dflt">64</span> <span class="flag">ISO_NO_DECONV</span> <span class="flag">ISO_DECONVSTRENGTH</span> <span class="flag">ISO_SNRFALLOFF</span> <span class="flag">ISO_DENSITY_PCT</span> <span class="flag">ISO_STD_PCT</span> <span class="flag">ISO_ZCROP</span> <span class="flag">ISO_PRETRAINED</span> <span class="flag">ISO_CONTINUE</span> <span class="flag">ISO_XML_DIR</span><span class="dflt">warp_tiltseries</span> <span class="flag">ISO_NCPU</span> <span class="flag">ISO_MODULE</span><span class="dflt">isonet/0.3</span> <span class="flag">ISO_FORCE</span><span class="dflt">0</span> <span class="flag">ISO_EXTRA_REFINE</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Train on the ORIGINAL reconstruction only (own deconv inside). The refine step is hours on GPU. Flags verified against isonet.py 0.3 -h (2026-08-15).</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>IsoNet: predict</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Apply a trained IsoNet model across the dataset (isonet.py predict). Train once, predict many — the model transfers across similar datasets (EML45↔EML46).</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries/reconstruction, membrane/isonet</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/isonet_corrected</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">ISO_MODEL</span> <span class="flag">ISO_TOMO_LIST</span> <span class="flag">ISO_GPU</span><span class="dflt">0</span> <span class="flag">ISO_PIXEL_SIZE</span><span class="dflt">12.56</span> <span class="flag">ISO_CUBE</span> <span class="flag">ISO_CROP</span> <span class="flag">ISO_MODULE</span><span class="dflt">isonet/0.3</span> <span class="flag">ISO_FORCE</span><span class="dflt">0</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>WEDGE-RESTORED VOLUMES ARE FOR COORDINATES ONLY — extraction for averaging must use the original reconstruction (PROVENANCE.json enforces the refusal downstream). Flags verified against isonet.py 0.3 -h (2026-08-15).</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>IsoNet 2: train</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Train an IsoNet 2 model (PyTorch rewrite) on a few representative tomograms: prepare_star → deconv → make_mask → refine. Missing-wedge correction, denoising and CTF handling happen in ONE optimisation loop, so there is no separate extract step.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries/reconstruction, warp_tiltseries</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/isonet2</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">ISO2_TOMO_LIST</span> <span class="flag">ISO2_GPU</span><span class="dflt">0</span> <span class="flag">ISO2_EVEN_DIR</span> <span class="flag">ISO2_ODD_DIR</span> <span class="flag">ISO2_PIXEL_SIZE</span><span class="dflt">12.56</span> <span class="flag">ISO2_SUBTOMOS</span><span class="dflt">auto</span> <span class="flag">ISO2_EPOCHS</span> <span class="flag">ISO2_ARCH</span> <span class="flag">ISO2_CUBE</span> <span class="flag">ISO2_METHOD</span><span class="dflt">auto</span> <span class="flag">ISO2_REFINE_INPUT_COL</span><span class="dflt">rlnTomoName</span> <span class="flag">ISO2_CTF_MODE</span> <span class="flag">ISO2_NO_DECONV</span> <span class="flag">ISO2_ZCROP</span> <span class="flag">ISO2_BFACTOR</span> <span class="flag">ISO2_PRETRAINED</span> <span class="flag">ISO2_XML_DIR</span><span class="dflt">warp_tiltseries</span> <span class="flag">ISO2_ENV</span> <span class="flag">ISO2_FORCE</span><span class="dflt">0</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Train on the ORIGINAL reconstruction only. Checkpoints are .pt — the IsoNet 1 predict step wants .h5 and the two never mix. Flags verified against IsoNet2 2.0.1b0 (isonet2_helps.txt, 2026-08-15); its CLI is python-fire, where -h means --highpassnyquist, so the wrapper only ever uses long flags.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>IsoNet 2: predict</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Apply a trained IsoNet 2 checkpoint across the dataset (isonet.py predict). Train once, predict many.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries/reconstruction, membrane/isonet2</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/isonet2_corrected</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">ISO2_MODEL</span> <span class="flag">ISO2_TOMO_LIST</span> <span class="flag">ISO2_EVEN_DIR</span> <span class="flag">ISO2_ODD_DIR</span> <span class="flag">ISO2_GPU</span><span class="dflt">0</span> <span class="flag">ISO2_PIXEL_SIZE</span><span class="dflt">12.56</span> <span class="flag">ISO2_INPUT_COL</span><span class="dflt">rlnTomoName</span> <span class="flag">ISO2_PADDING</span> <span class="flag">ISO2_XML_DIR</span><span class="dflt">warp_tiltseries</span> <span class="flag">ISO2_ENV</span> <span class="flag">ISO2_FORCE</span><span class="dflt">0</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>CORRECTED VOLUMES ARE FOR COORDINATES ONLY — extraction for averaging must use the original reconstruction (PROVENANCE.json enforces the refusal downstream). Flags verified against IsoNet2 2.0.1b0 (2026-08-15).</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Membrane: segment</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Segment membranes with membrain-seg (GPU). Writes a segmentation plus a *_scores.mrc score map per tomogram; the score map is what the whole tuning loop downstream feeds on.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: membrane/deconv</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/segment</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">MB_CKPT</span> <span class="flag">MB_TOMO_LIST</span> <span class="flag">MB_GPU</span><span class="dflt">0</span> <span class="flag">MB_PIXEL_SIZE</span><span class="dflt">12.56</span> <span class="flag">MB_WINDOW</span> <span class="flag">MB_NO_TTA</span> <span class="flag">MB_UNCERTAINTY</span> <span class="flag">MB_NO_PROBS</span> <span class="flag">MB_CONDA_ENV</span><span class="dflt">membrainseg</span> <span class="flag">MB_FORCE</span><span class="dflt">0</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Score maps ON is the default and should stay on — *_scores.mrc makes re-thresholding free. Flags verified against membrain-seg 0.0.10 (2026-08-14); --store-uncertainty-map is the current spelling.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Membrane: threshold sweep</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Threshold membrane score maps into binary segmentations (membrain thresholds). Cheap CPU pass — THE tuning loop: segment once on GPU, re-threshold as often as needed for free.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: membrane/segment</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/thresholds</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">MB_THRESHOLDS</span><span class="dflt">0.0</span> <span class="flag">MB_TOMO_LIST</span> <span class="flag">MB_CONDA_ENV</span><span class="dflt">membrainseg</span> <span class="flag">MB_FORCE</span><span class="dflt">0</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Never rely on the tool&#x27;s default out-folder (./predictions) — this stage always passes it explicitly. Flags verified against membrain-seg 0.0.10 (2026-08-14).</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Membrane: components</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Label connected components of the thresholded membranes (membrain components), sweep the min-size cutoff, and record Found/Relabeled per volume into components_metrics.tsv.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: membrane/thresholds</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/components</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">MB_CC_THRES</span><span class="dflt">50</span> <span class="flag">MB_PATTERN</span> <span class="flag">MB_TOMO_LIST</span> <span class="flag">MB_PIXEL_SIZE</span><span class="dflt">12.56</span> <span class="flag">MB_CONDA_ENV</span><span class="dflt">membrainseg</span> <span class="flag">MB_FORCE</span><span class="dflt">0</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>The tool does NOT create --out-folder (the wrapper does). Flags verified against membrain-seg 0.0.10 (2026-08-14).</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Membrane: meshes</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Convert membrane segmentations to meshes with projected tomogram values (membrain_pick convert_file, env membrainpick — the branch switches conda envs here).</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: membrane/thresholds, membrane/deconv</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/mesh</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">MB_PIXEL_SIZE</span><span class="dflt">12.56</span> <span class="flag">MB_ONLY_LARGEST</span> <span class="flag">MB_STEP_SIZE</span> <span class="flag">MB_STEP_LO</span> <span class="flag">MB_STEP_HI</span> <span class="flag">MB_BARY_AREA</span><span class="dflt">400</span> <span class="flag">MB_SMOOTHING</span><span class="dflt">1000</span> <span class="flag">MB_PATTERN</span> <span class="flag">MB_TOMO_LIST</span> <span class="flag">MB_CONDA_ENV</span><span class="dflt">membrainpick</span> <span class="flag">MB_FORCE</span><span class="dflt">0</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Sibling flag drift: convert_file takes --tomogram-path, convert_mb_folder takes --tomo-path — this stage uses convert_file only. Step units (px vs Å) are UNRESOLVED — verify visually, the code does not guess. Flags verified against membrain-pick 0.0.9 (2026-08-14).</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Variant polarity</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Measures whether membranes are darker or brighter than their surroundings, and records it against the variant.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: warp_tiltseries/reconstruction, membrane/segment</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: —</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--out</span><span class="dflt">jobs/{jobid}</span> <span class="flag">--root</span><span class="dflt">.</span> <span class="flag">--variant-path</span> <span class="flag">MB_CONDA_ENV</span><span class="dflt">membrainseg</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Run it once per VARIANT, not once per tomogram. A polarity measured on the raw reconstruction says nothing about an IsoNet-corrected one — that is exactly the pair that differs.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Population radius + volume</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Measures the virion population — radius AND volume — over the whole dataset, before any per-tomogram fitting.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: membrane/components</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/population</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--components</span><span class="dflt">membrane/components/cc50</span> <span class="flag">--out-folder</span><span class="dflt">jobs/{jobid}</span> <span class="flag">--min-size</span><span class="dflt">1000@12.56</span> <span class="flag">--diam-range</span><span class="dflt">60 160</span> <span class="flag">--tomo-list</span> <span class="flag">MB_CONDA_ENV</span><span class="dflt">membrainseg</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Pooling uses the MEDIAN, not the mean: a single tomogram full of merged blobs drags a mean and barely moves a median. Check the MAD — if it is much above 10%, the components are probably still merged, and Split clusters is the next step.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Virion size QC (outliers)</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Judges every connected component against the measured population: too big = likely a fused cluster of k virions, too small = likely debris. Writes verdicts (json/csv), an outliers-only label volume for napari, and an inspection shortlist.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: membrane/components, membrane/population</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/size_qc</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--components</span> <span class="flag">--population</span> <span class="flag">--angpix</span><span class="dflt">12.56</span> <span class="flag">--small-frac</span><span class="dflt">0.35</span> <span class="flag">--big-frac</span><span class="dflt">1.7</span> <span class="flag">--sample</span><span class="dflt">10</span> <span class="flag">--tomogram</span> <span class="flag">--out-folder</span><span class="dflt">jobs/{jobid}</span> <span class="flag">MB_CONDA_ENV</span><span class="dflt">membrainseg</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>A judgement aid, not a filter — nothing is removed. Verdicts inherit the population&#x27;s quality: if the population was measured on still-merged components, run Split clusters and re-measure first. 🔍 View in napari opens outliers_only.mrc over the tomogram; label values match the report, so napari&#x27;s label picker reads the same numbers.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Split merged virions</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Separates virions that connected-component labelling fused into one blob.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: membrane/components, membrane/population</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/split</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--components</span><span class="dflt">membrane/components/cc50</span> <span class="flag">--population</span> <span class="flag">--out-folder</span><span class="dflt">jobs/{jobid}</span> <span class="flag">--merge-ratio</span><span class="dflt">1.4</span> <span class="flag">--tol-mad</span><span class="dflt">2.0</span> <span class="flag">--min-coverage</span><span class="dflt">0.30</span> <span class="flag">--min-separation</span><span class="dflt">1.5</span> <span class="flag">MB_CONDA_ENV</span><span class="dflt">membrainseg</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>OVER-SPLITTING IS THE REAL RISK, and it is invisible: a missed split loses one particle, but an invented one adds a virion that never existed to every count, diameter and volume downstream. So a candidate must also be HOLLOW — coverage alone cannot tell a virion from a solid lump, since a sphere drawn inside any dense object passes through material in every direction. Compare the counts before and after.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Fit virions</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Finds virions in a components volume and measures each one: centre, radius, volume, density support.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: membrane/components, warp_tiltseries/reconstruction</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/popfits</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--components</span><span class="dflt">membrane/components/cc50</span> <span class="flag">--tomogram</span><span class="dflt">warp_tiltseries/reconstruction</span> <span class="flag">--polarity</span><span class="dflt">unknown</span> <span class="flag">--out-folder</span><span class="dflt">jobs/{jobid}</span> <span class="flag">--min-size</span><span class="dflt">1000@12.56</span> <span class="flag">--population</span> <span class="flag">--write-masks</span><span class="dflt">on</span> <span class="flag">MB_CONDA_ENV</span><span class="dflt">membrainseg</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Volume comes from the CONSTRAINED radius, never a free ellipsoid: the missing wedge smears membranes along z, and an ellipsoid follows that smear, inflating volume by ~50%. Polarity must be measured, not guessed.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Pick surfaces</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Oversampled picking: sites at ~50 Å over every accepted surface, plus shells inside and outside it.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: membrane/popfits</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/picks</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--fits</span> <span class="flag">--tomostar</span> <span class="flag">--out</span><span class="dflt">membrane/picks/{jobid}_oversample.star</span> <span class="flag">--spacing</span><span class="dflt">50</span> <span class="flag">--shells</span><span class="dflt">0,50,-50</span> <span class="flag">--random-psi</span> <span class="flag">MB_CONDA_ENV</span><span class="dflt">membrainseg</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Theta cannot be reconstructed later, and detection efficiency depends on it, so any spatial statistic computed without it is biased unrecoverably. Psi is undetermined by a normal — refine it, never trust it.</li></ul></div>
+</section>
+
+<section class="card">
+  <h2>Parameter search</h2>
+  <div class="cmd">bash</div>
+  <p class="what-p">Costs and plans a parameter sweep over the variant registry, caching the expensive axis.</p>
+
+  <div class="io">
+    <div class="col">
+      <h3 class="reads">READS</h3>
+      <div class="dirs">dirs: membrane/components, warp_tiltseries/reconstruction</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+    <div class="col">
+      <h3 class="writes">WRITES</h3>
+      <div class="dirs">dirs: membrane/explore</div>
+      <table><tr><td colspan="2" class="none">(none)</td></tr></table>
+    </div>
+  </div>
+
+  <div class="flags"><b>Flags</b> <span class="flag">--root</span><span class="dflt">.</span> <span class="flag">--out</span><span class="dflt">jobs/{jobid}</span> <span class="flag">--tomo-dir</span><span class="dflt">raw=warp_tiltseries/reconstruction</span> <span class="flag">--derive-deconv</span><span class="dflt">raw</span> <span class="flag">--tomogram</span><span class="dflt">Position003 Position045</span> <span class="flag">--threshold</span><span class="dflt">-2 0 2</span> <span class="flag">--threshold-mode</span><span class="dflt">absolute</span> <span class="flag">--cutoff</span><span class="dflt">1000@12.56 10000@12.56</span> <span class="flag">--run</span> <span class="flag">--ckpt</span> <span class="flag">--gpu</span><span class="dflt">0</span> <span class="flag">MB_CONDA_ENV</span><span class="dflt">membrainseg</span></div>
+  <div class="notes"><b>Watch out</b><ul><li>Rank cells on virions accepted AND recall together: the gates measure precision only, so accepting three easy virions scores perfectly on all of them.</li></ul></div>
 </section>
 <div class='group'>Cross-cutting gotchas</div><div class='big'>
 <div class='gotcha'><b>A failed item is SILENTLY DESELECTED</b> &mdash; Any per-item failure marks that series unselected <i>in its .xml</i>, and every downstream step then skips it without saying so. After ANY partial failure run <code>WarpTools change_selection --settings warp_tiltseries.settings --select</code>.</div>

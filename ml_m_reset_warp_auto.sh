@@ -132,6 +132,7 @@ echo
 echo "Moving setup files to $TRASH/ (nothing is deleted):"
 for d in "${MDIRS[@]}"; do
     [ -d "$d" ] || continue
+    case "$d" in m_trash_*) continue ;; esac    # never re-trash a previous trash
     # only a directory that actually holds M state — never a stray "m*" of yours
     if ls "$d"/*.population >/dev/null 2>&1 || [ -d "$d/species" ] \
        || [ -d "$d/refinement_temp" ]; then
@@ -139,7 +140,12 @@ for d in "${MDIRS[@]}"; do
     fi
 done
 for f in "${SOURCES[@]}"; do
-    mv "$f" "$TRASH/" 2>/dev/null && echo "    moved $f"
+    case "$f" in m_trash_*/*) continue ;; esac  # sources already in a trash stay
+    # Preserve the subpath: two dirs can hold a same-named .source, and a flat
+    # move would overwrite the first with the second.
+    dest="$TRASH/$(dirname "$f")"
+    mkdir -p "$dest"
+    mv "$f" "$dest/" 2>/dev/null && echo "    moved $f"
 done
 echo
 echo "Reset done. Now run, ONCE each and in this order:"

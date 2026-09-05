@@ -264,6 +264,7 @@ cfg_path, mode, abs_input, abs_model = sys.argv[1], sys.argv[2], sys.argv[3], sy
 try:
     text = open(cfg_path, errors="replace").read()
 except OSError:
+    print("SYNC-FAILED could not read the config")
     sys.exit(0)
 
 want = {}
@@ -297,17 +298,30 @@ if changed:
     print("BACKUP %s" % os.path.basename(bak))
     for c in changed:
         print(c)
+else:
+    # Sentinel, so the shell can tell "verified, nothing to change" apart from
+    # "the sync block itself died" (its stderr is discarded). Without it, a
+    # crashed sync printed 'config paths already match' — the exact opposite of
+    # the truth, on the check that exists to stop overwriting ANOTHER project's
+    # xml files.
+    print("OK-NOCHANGE")
 PYEOF
 )
-if [ -n "$SYNC_MSG" ]; then
-    echo "-------------------------------------------------------------------"
-    echo "CONFIG PATH SYNC — '$CONFIG' pointed somewhere else; corrected to match this job:"
-    while IFS= read -r line; do echo "   $line"; done <<< "$SYNC_MSG"
-    echo "   (the YAML decides which data is processed, so it must match input_dir)"
-    echo "-------------------------------------------------------------------"
-else
-    echo "config paths already match this job (data dir: $_ABS_INPUT)"
-fi
+case "$SYNC_MSG" in
+    OK-NOCHANGE)
+        echo "config paths already match this job (data dir: $_ABS_INPUT)" ;;
+    ""|SYNC-FAILED*)
+        echo "ERROR: could not verify (or fix) the config's data paths in '$CONFIG'." >&2
+        echo "       If it points at another project, miss-alignment would overwrite" >&2
+        echo "       THAT project's alignments. Check/fix the YAML, then re-run." >&2
+        exit 2 ;;
+    *)
+        echo "-------------------------------------------------------------------"
+        echo "CONFIG PATH SYNC — '$CONFIG' pointed somewhere else; corrected to match this job:"
+        while IFS= read -r line; do echo "   $line"; done <<< "$SYNC_MSG"
+        echo "   (the YAML decides which data is processed, so it must match input_dir)"
+        echo "-------------------------------------------------------------------" ;;
+esac
 
 # Pre-flight: catch a structurally broken config (missing/misplaced keys) HERE with a
 # clear message, instead of a deep KeyError traceback from inside miss-alignment. The

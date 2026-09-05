@@ -97,6 +97,12 @@ done
 # (a read loop, not mapfile — mapfile is bash 4+ and this must also run where the
 #  script is developed/tested)
 ALL=()
+if [ -n "${SERIES_LIST:-}" ] && [ ! -f "${SERIES_LIST}" ]; then
+    # A typo'd list must not silently fall through to "bisect ALL series" —
+    # that's GPU-hours per round on the wrong candidate set.
+    echo "ERROR: SERIES_LIST is set but not a file: ${SERIES_LIST}" >&2
+    exit 2
+fi
 if [ -n "${SERIES_LIST:-}" ] && [ -f "${SERIES_LIST}" ]; then
     while IFS= read -r line; do
         [ -n "$line" ] && ALL+=("$line")
@@ -242,6 +248,8 @@ case $? in
     0) echo "The full set refined CLEANLY. Nothing to bisect — the crash is not in"
        echo "the series list (try your real population again, or reset M)."; exit 0 ;;
     2) echo "Setup failed before refinement — fix that first (see the log above)."; exit 1 ;;
+    3) echo "The full set FAILED, but not with the index crash this script hunts —"
+       echo "bisecting would chase the wrong bug. Fix that failure first."; exit 1 ;;
 esac
 echo "  confirmed: crashes."
 

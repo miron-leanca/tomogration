@@ -25,6 +25,18 @@ class _Perm(metaclass=_Meta):
     def __ror__(self, o):
         return self
 
+    # Qt returns INTEGERS from count()/currentRow()/etc, and code does
+    # range(w.topLevelItemCount()). Without these, any such loop dies with
+    # "'_Perm' object cannot be interpreted as an integer" and the dialog
+    # cannot be constructed in a test at all. Deliberately NOT __len__ or
+    # __bool__: those would flip _Perm to falsy and change how every existing
+    # `if widget:` in the app behaves under the stub.
+    def __index__(self):
+        return 0
+
+    def __int__(self):
+        return 0
+
     def __eq__(self, o):
         return False
 

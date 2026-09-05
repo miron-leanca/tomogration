@@ -469,10 +469,29 @@ check("dont_overwrite is exposed so a run can protect an existing set",
       any(p["name"] == "dont_overwrite" for p in REC["params"]))
 check("the V100 deconv warning still wins",
       "V100" in REC["validate"]({"perdevice": 2, "deconv": True}))
-# The stage must NOT declare its own --output_processing: job mode wires that
-# flag automatically, and a second one would be passed twice.
-check("ts_reconstruct does not duplicate the auto-wired output flag",
-      not any(p.get("flag") == "--output_processing" for p in REC["params"]))
+# The stage DOES declare --output_processing (variant threads — a bin4 and a
+# bin8 run of the same tilt series, each keeping its own tomograms). Job mode
+# wires that flag automatically too, so the invariant is that exactly ONE
+# survives: the typed one when set, the automatic one when blank.
+check("ts_reconstruct offers an explicit output folder",
+      any(p.get("flag") == "--output_processing" for p in REC["params"]))
+_store = {"jobs": {}}
+_job = {"id": "J7", "output_dir": "jobs/J7", "inputs": {},
+        "params": {"angpix": "10"}}
+_auto = jobs.build_job_command(REC, _job, _store)
+check("blank output folder falls back to the job's own dir, exactly once",
+      _auto.count("--output_processing") == 1
+      and "--output_processing jobs/J7" in _auto)
+# The literal "None": params saved before a field existed have no key for it,
+# and str(None) is a non-empty string that reads as a real value.
+check("a param the saved job never had emits nothing, not 'None'",
+      "None" not in _auto)
+_job2 = dict(_job, params={"angpix": "6.28",
+                           "output_processing": "jobs/{jobid}/reconstruction_bin4"})
+_typed = jobs.build_job_command(REC, _job2, _store)
+check("a typed output folder wins and is not doubled",
+      _typed.count("--output_processing") == 1
+      and "--output_processing jobs/J7/reconstruction_bin4" in _typed)
 
 
 # ---- the .species file is the authoritative record --------------------------

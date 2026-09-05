@@ -77,6 +77,11 @@ TILTAXIS="${ARETOMO_TILTAXIS:-}"
 PATCH="${ARETOMO_PATCH:-}"
 ALIGN="${ARETOMO_ALIGN:-1}"
 RECON="${ARETOMO_RECON:-1}"
+# RECON=0 must actually DO something (it was echoed and audited but never passed
+# to AreTomo): -VolZ 0 is AreTomo2's align-only mode — .xf/.tlt still written.
+if [ "$RECON" = "0" ]; then
+    VOLZ=0
+fi
 ARETOMO2_BIN="${ARETOMO_BIN:-/ceph/groups/structbio/Programs/AreTomo2/AreTomo2}"
 # Parallelism: spread tilt series across these GPUs (space/comma list), N jobs each.
 # Each AreTomo job uses ONE GPU; ARETOMO_GPUS empty falls back to the single positional GPU.
@@ -320,6 +325,10 @@ process_one_series() {
         -Align "$ALIGN" \
         "${EXTRA_FLAGS[@]}"; then
         echo "ERROR: AreTomo2 failed for $name"
+        # AreTomo writes -OutMrc incrementally: a crash leaves a truncated,
+        # non-empty file the skip test above would call "already reconstructed"
+        # on every rerun — remove it so the series gets retried.
+        rm -f "$OUTMRC"
         return 1
     fi
 

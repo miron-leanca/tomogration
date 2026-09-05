@@ -34,15 +34,20 @@ def check(name, cond):
         print(f"FAIL  {name}")
 
 
-def card(jid, stage="ts_export_particles", status="completed", ghost=False):
-    return {"id": jid, "stage_id": stage, "status": status, "is_ghost": ghost}
+def card(jid, stage="ts_export_particles", status="completed", ghost=False,
+         template=False):
+    # The rail template is ghost AND template; discovered 'disk:<stage>' cards
+    # are ghost only — canvas_layout sets both flags, mirror that here.
+    return {"id": jid, "stage_id": stage, "status": status, "is_ghost": ghost,
+            "is_template": template}
 
 
 def main():
     # the exact reported scenario: four Extract jobs, ONE running
     j19, j20, j24, j25 = (card("J19"), card("J20"), card("J24"),
                           card("J25", status="queued"))
-    ghost = card("ghost:ts_export_particles", status="ghost", ghost=True)
+    ghost = card("ghost:ts_export_particles", status="ghost", ghost=True,
+                 template=True)
     live = {"running": True, "job_id": "J24", "progress": "12/290"}
 
     check("the running job lights up", R(j24, live))
@@ -59,7 +64,11 @@ def main():
     check("trunk run does NOT light real jobs",
           not any(R(c, trunk) for c in (j19, j20, j24, j25)))
     check("trunk run leaves other stages alone",
-          not R(card("J3", stage="ts_ctf", status="ghost", ghost=True), trunk))
+          not R(card("J3", stage="ts_ctf", status="ghost", ghost=True,
+                     template=True), trunk))
+    check("trunk run does NOT light a discovered disk ghost",
+          not R(card("disk:ts_export_particles", status="ghost", ghost=True),
+                trunk))
 
     # a job whose STORE record says running is always live (e.g. after a repaint)
     check("stored running status wins", R(card("J9", status="running"), {}))

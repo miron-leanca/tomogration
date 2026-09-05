@@ -27,6 +27,7 @@ def main():
         print("no test_*.py found next to run_all.py")
         return 1
     total_pass = total_fail = bad_suites = 0
+    crashed = []
     width = max(len(s.name) for s in suites)
     print("=" * (width + 34))
     for s in suites:
@@ -39,6 +40,7 @@ def main():
                 m = hit
         if m is None:                       # suite crashed before its tally line
             bad_suites += 1
+            crashed.append(s.name)
             print(f"{s.name:<{width}}  CRASHED (exit {r.returncode})")
             print("\n".join(out.strip().splitlines()[-12:]))
             continue
@@ -53,7 +55,15 @@ def main():
                 if line.startswith("FAIL"):
                     print(f"      {line}")
     print("=" * (width + 34))
-    print(f"{len(suites)} suite(s): {total_pass} passed, {total_fail} failed")
+    # The crash count belongs on the SUMMARY line, not only in the exit code.
+    # A suite that dies before printing its tally contributes 0 failures, so
+    # this line read "1242 passed, 0 failed" while two suites were not running
+    # at all — which is exactly the moment it is most likely to be believed.
+    line = f"{len(suites)} suite(s): {total_pass} passed, {total_fail} failed"
+    if crashed:
+        line += (f", {len(crashed)} CRASHED before reporting "
+                 f"({', '.join(crashed)})")
+    print(line)
     return bad_suites
 
 

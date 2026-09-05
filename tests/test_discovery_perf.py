@@ -82,7 +82,66 @@ def main():
           {"frames", "mdocs", "warp_tiltseries"} <= jobs.SKIP_SCAN_DIRS)
     check("scan stays small (no data-dir walk)", len(touched) < 40)
 
-    print(f"\n{passed} passed, {failed} failed")
+        # ---------------------------------------------------------------------------
+    # The viewer inventory is the same class of bug, and it bit on 2026-08-19:
+    # "view in napari" on a 72-tomogram mesh job froze tomogration until the
+    # desktop offered to kill it. viewer_inventory listed the series with one
+    # rglob and then called viewer_plan PER SERIES, each doing another rglob of
+    # the same tree — 73 recursive walks plus 72 globs of the tomogram folder, on
+    # the UI thread. Fine on a local disk, fatal on /ceph where every stat is a
+    # network round trip. It must stay a single pass however many tomograms there
+    # are.
+    import pathlib as _pl
+    import time as _time
+
+    with tempfile.TemporaryDirectory() as _td:
+        _r = Path(_td)
+        _out = _r / "jobs/J39"
+        _out.mkdir(parents=True)
+        _grey = _r / "grey"
+        _grey.mkdir()
+        for _i in range(1, 73):
+            _p = f"Position{_i:03d}"
+            (_grey / f"{_p}_12.56Apx_isonet2.mrc").write_bytes(b"")
+            _stem = f"{_p}_12.56Apx_isonet2_scores_threshold_-1.5_components"
+            for _k in range(6):
+                (_out / f"{_stem}_mesh{_k}.h5").write_bytes(b"")
+
+        _walks = {"n": 0}
+        _orig = _pl.Path.rglob
+
+        def _counting(self, pat):
+            _walks["n"] += 1
+            return _orig(self, pat)
+
+        _pl.Path.rglob = _counting
+        try:
+            _t = _time.perf_counter()
+            _inv = jobs.viewer_inventory("mb_mesh", "jobs/J39", "grey", _r)
+            _dt = _time.perf_counter() - _t
+        finally:
+            _pl.Path.rglob = _orig
+
+        check("the inventory walks the output tree ONCE, not once per series "
+              f"({_walks['n']} walk(s) for 72 tomograms)", _walks["n"] <= 2)
+        check(f"and stays quick enough for the UI thread ({_dt * 1000:.0f} ms)",
+              _dt < 1.0)
+        check("all 72 tomograms are still listed", len(_inv) == 72)
+        check("each series still carries its six meshes",
+              all(sum(f.endswith(".h5") for f in v) == 6
+                  for v in _inv.values()))
+        # surforama is handed ONE .h5 whose densities were projected from the
+        # tomogram when the mesh was built, so a .mrc here would be an entry
+        # that cannot be opened. The tomogram folder is still read — it is what
+        # names the groups — it just is not offered as something to tick.
+        check("but no tomogram is offered to surforama, which cannot take one",
+              all(not f.endswith(".mrc") for v in _inv.values() for f in v))
+        check("the groups are still named after the tomograms",
+              all(k.startswith("Position") and "_12_" not in k for k in _inv))
+        check("Position10 did not collect Position106's tomogram",
+              all("Position106" not in f for f in _inv.get("Position010", [])))
+
+        print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 
 

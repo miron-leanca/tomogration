@@ -78,7 +78,10 @@ done
 # ---- which series clear the threshold -------------------------------------
 # Particle rows name their subtomogram as .../subtomo/<Series>/<Series>_NNN_*.mrc,
 # so the second-to-last path component is the tilt series.
-LIST="/tmp/m_series_${POP_NAME}.txt"
+# mktemp, not a fixed /tmp name: on a shared node another user's identically
+# named file is unwritable — and the redirection failing would leave THEIR stale
+# series list to be read below.
+LIST=$(mktemp "${TMPDIR:-/tmp}/m_series_${POP_NAME}.XXXXXX")
 awk -v T="$MIN_PARTICLES" '
     /\.mrc/ { split($0, a, "/"); n[a[length(a)-1]]++ }
     END { for (p in n) if (n[p] >= T) print p }

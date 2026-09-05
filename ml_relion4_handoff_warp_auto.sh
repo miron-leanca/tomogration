@@ -94,7 +94,10 @@ done
 
 # Assert the launch-root invariant: the FIRST subtomo image path in the star must
 # resolve from PROJECT_DIR. If not, we'd be launching from the wrong place.
-first_img=$(grep -oE '[^[:space:]]+\.mrc' "$STAR" | head -1 || true)
+# \.mrc($|[^s]) so the .mrc prefix inside .mrcs (2D exports) can't match and
+# produce a bogus "launch-root mismatch" for a file that exists.
+first_img=$(grep -oE '[^[:space:]]+\.mrc($|[^[:alnum:]])' "$STAR" \
+            | sed 's/\.mrc[^[:alnum:]]*$/.mrc/' | head -1 || true)
 if [ -n "$first_img" ]; then
     case "$first_img" in
         /*) probe="$first_img" ;;                 # absolute (relative_output_paths off)
@@ -128,8 +131,10 @@ echo "  ${IMG_HANDLER[*]}"
 # (0:1:2:3). A space/comma list (0 1 2 3 / 0,1,2,3) makes every follower pile
 # onto the first device — the classic "RELION only uses 1 GPU" trap. Accept any
 # separator here, count the ids, and emit the colon form.
-GPU_IDS=$(printf '%s' "$GPUS" | tr ',: ' '\n\n\n' | grep -E '^[0-9]+$')
-n_gpu=$(printf '%s\n' "$GPU_IDS" | grep -c '[0-9]')
+# `|| true`: grep exits 1 on no match, and under set -e that would kill the
+# script HERE, silently — before the n_gpu<1 fallback below ever runs.
+GPU_IDS=$(printf '%s' "$GPUS" | tr ',: ' '\n\n\n' | grep -E '^[0-9]+$' || true)
+n_gpu=$(printf '%s\n' "$GPU_IDS" | grep -c '[0-9]' || true)
 if [ "$n_gpu" -lt 1 ]; then n_gpu=1; GPU_IDS=0; fi
 GPU_ARG=$(printf '%s\n' "$GPU_IDS" | tr '\n' ':' | sed 's/:*$//')   # -> 0:1:2:3
 MPI=$((n_gpu + 1))                                   # 1 non-GPU leader + n followers
@@ -181,8 +186,10 @@ done
 
 mkdir -p "$PROJECT_DIR/Class3D/job001"
 echo "Launching Class3D from $PROJECT_DIR …"
-( cd "$PROJECT_DIR" && "${REFINE[@]}" )
-status=$?
+# `|| status=$?`: without it, set -e terminates the script on a non-zero relion
+# exit and the failure diagnostic below never prints.
+status=0
+( cd "$PROJECT_DIR" && "${REFINE[@]}" ) || status=$?
 echo "==================================================================="
 if [ "$status" -eq 0 ]; then
     echo "RELION 4 Class3D finished OK. Outputs under $OUT*."

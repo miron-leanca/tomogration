@@ -180,6 +180,32 @@ def main():
         check("its parameters survive cancellation",
               app.load_jobs(r2)["jobs"][b["id"]]["stage_id"] == "ts_ctf")
 
+        # ---- run order is ENQUEUE order, not J-number -----------------------
+        # Re-queueing an old job used to jump it ahead of everything queued
+        # since (creation order), directly contradicting the "runs when the
+        # queue reaches it" message.
+        with tempfile.TemporaryDirectory() as td3:
+            r3 = Path(td3)
+            old = app.new_job(r3, "ts_ctf", "old", {})
+            app.update_job(r3, old["id"], status="queued",
+                           queued_at="2026-08-01 10:00:00")
+            newer = app.new_job(r3, "ts_reconstruct", "newer", {})
+            app.update_job(r3, newer["id"], status="queued",
+                           queued_at="2026-08-01 11:00:00")
+            # 'old' fails, is re-queued LATER -> it must go to the back.
+            app.update_job(r3, old["id"], status="failed")
+            app.update_job(r3, old["id"], status="queued",
+                           queued_at="2026-08-01 12:00:00")
+            order = [j["id"] for j in app.queued_jobs(app.load_jobs(r3))]
+            check("a re-queued job joins the back of the queue",
+                  order == [newer["id"], old["id"]])
+            # Legacy records without queued_at fall back to creation time.
+            legacy = app.new_job(r3, "ts_stack", "legacy", {})
+            app.update_job(r3, legacy["id"], status="queued")
+            order = [j["id"] for j in app.queued_jobs(app.load_jobs(r3))]
+            check("a record without queued_at still queues (by creation)",
+                  set(order) == {newer["id"], old["id"], legacy["id"]})
+
         # Every state needs a colour, or a job goes invisible on the canvas.
         for stt in app.JOB_STATES:
             check(f"'{stt}' has a card style", stt in app._CARD_STYLE)

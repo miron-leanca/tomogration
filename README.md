@@ -18,10 +18,12 @@ reproducibility of the command line with the convenience of a GUI.
 
 ![The Tomogration main window](docs/screenshot.png)
 
-> **Scope:** raw data preparation → template matching → particle export → a
-> **RELION 4 Class3D handoff**. High-resolution refinement (RELION `Refine3D`,
-> RELION 5 `--tomo`, M) still happens in those tools' own pipelines — Tomogration
-> gets you a clean 3D classification and hands off, it doesn't reimplement refinement.
+> **Scope:** raw data preparation → template matching → particle export → the
+> **RELION 4 loop** (Class3D handoff, class selection, re-extraction) → the
+> **M refinement group** (population/source/species setup, MCore runs, weights,
+> version tracking). The heavy lifting still happens in RELION's and M's own
+> engines — Tomogration builds, launches, and audits those runs, it doesn't
+> reimplement classification or refinement.
 
 Tomogration is a **wrapper/controller**: it doesn't reimplement any cryo-ET
 algorithm, it runs the real tools and manages the bookkeeping around them
@@ -54,9 +56,45 @@ so nothing is hidden and you can still drop to the terminal any time.
 - **Open outputs in one click** — a 📂 (file manager) and a **3dmod** button next
   to each step's output, so you never hand-type `module load 3dmod; 3dmod *.mrc`.
 - **A Tilt Inspector** to review series, exclude bad tilts/whole series, and open
-  them in 3dmod.
+  them in 3dmod. Sorting files the coarse per-series `Position*.mrc` tilt stacks
+  into `mrcs-tiltseries-coarse/` and the inspector opens them from there, so the
+  project root stays a dozen folders instead of thousands of MRCs (a project
+  sorted by an older build is tidied on **Init dirs** or on opening the
+  inspector — nothing is overwritten, and only root-level `Position*.mrc` moves).
+- **A `Project` button** beside the root box, for switching project on the fly.
+  It lists your bookmarked folders and the projects inside each one, ticking the
+  one you're in. A bookmark can be a project root *or* a folder holding several
+  — both are listed. Bookmarks live in `~/.tomogration.json` (`project_dirs`)
+  and are editable from the menu, one path per line.
 - **A Processing History** window: a flowchart of every run, its non-default
   parameters, and clickable input/output files (openable with 3dmod/gedit).
+- **A workflow-graph canvas** (the default view): every run is a **job card**
+  with its own `jobs/J###` output dir. Cards can be queued, forked, wired into
+  downstream jobs, dragged into branches, cleared, or deleted; work done
+  outside the app (pick sets, RELION jobs) is discovered on disk and offered for
+  adoption as cards. The canvas view is
+  `[ pinned pipeline outline | canvas | full-height terminal ]`:
+  - the **pipeline outline** is pinned down the left window edge (the default
+    pipeline as an always-visible reference — click a step to show its work,
+    double-click to open it, drag it onto the canvas to add a job); job types
+    are filed under collapsible **categories** (the pipeline groups), each
+    with a rolled-up job count;
+  - the canvas itself is striped into **category bands** (dividing lines +
+    captions per pipeline group), so Warp processing, RELION, M and the
+    membrane/IsoNet branch read as separate regions and new cards pop into
+    their category's band;
+  - each card has a **❯ pop-out panel** with three tabs — **Builder** (the
+    job's parameter form and run/queue buttons), **Details** (what the job
+    does and what every parameter means), **Outputs** (where its files are).
+    Panels stay open, track their job live, several can be open at once, and
+    each is **tethered to its card** — it follows the card through pans,
+    zooms and drags (move a panel and your chosen offset is kept);
+  - **Outputs rows drag into input fields** of any open builder — file vs
+    folder and relative vs absolute are converted to what the field wants;
+  - the **terminal** runs the full height on the right and has tabs: the app's
+    run log plus any number of scratch shell tabs (＋). The widths you drag
+    the outline/canvas/terminal splitters to are remembered and become the
+    default.
 
 ---
 
@@ -64,7 +102,7 @@ so nothing is hidden and you can still drop to the terminal any time.
 
 | Group | Step | What it does |
 |---|---|---|
-| **1. Data prep** | Rename / Sort | Rename raw EER + mdocs to `Position###`, sort into the project layout |
+| **1. Data prep** | Rename / Sort | Rename raw EER + mdocs to `Position###`, sort into the project layout (`frames/`, `mdocs/`, `gains/`, `mrcs-tiltseries-coarse/`) |
 | | Inspect tilt stacks | Review series, mark bad tilts / whole series for exclusion |
 | | Remake mdocs | Apply tilt exclusions and renumber mdoc ZValue blocks |
 | **2. Gain** | gain convert / reciprocal | Convert the `.gain` reference to the `.mrc` Warp expects |
@@ -80,7 +118,16 @@ so nothing is hidden and you can still drop to the terminal any time.
 | **8. Pick** | ts_template_match / threshold | Template-match particles and threshold the picks |
 | **9. Export** | ts_export_particles | Extract particles into a RELION project (3D subtomos for RELION 4, or 2D for RELION 5) |
 | **10. RELION 4** | RELION 4: convert STAR + init ref | Convert the Warp export star to RELION 4 format (rewrite particle paths), and build a de-novo initial reference from a random particle subset |
-| **10. RELION 4** | RELION 4: Class3D handoff | Pre-scale the reference, check the launch-root invariant, and submit 3D classification |
+| | Merge optics groups | Collapse per-export optics groups so RELION counts particles once, not per group |
+| | Check particles exist | Verify every particle image the star names is on disk (and optionally prune the missing) |
+| | RELION 4: Class3D handoff | Pre-scale the reference, check the launch-root invariant, and submit 3D classification |
+| | Select good class → picks | Turn a Class3D/Select result back into per-tomogram Warp pick stars |
+| | Re-extraction = ts_export_particles from a RELION star | Build the Export card downstream of a Subset-selection card: Warp reads the RELION star directly, applies the refined shifts itself, and cuts the same particles at a finer pixel size |
+| | Verify re-extraction | Cross-check the re-extracted set against the selection (counts, scale, recentring) |
+| **11. M refinement** | create population / source / species, mask | Set up an M project from the RELION results (population, data source, species with half-maps and mask) |
+| | M: refine (MCore) | Run MCore refinements — image/volume warp, CTF, defocus — one enabled thing at a time |
+| | estimate weights / resample trajectories | Per-series then per-tilt exposure weights; finer temporal pose sampling |
+| | CTF pre-flight, version index, reset, kill orphans | Guard against the IndexOutOfRange CTF trap, label and browse refinement versions, and recover a wedged M setup |
 
 Left-panel documentation for every step (what/why/parameters/pitfalls) lives in
 `tomogration_docs.json` and is shown in-app.
@@ -150,10 +197,22 @@ per workstation** — the `.venv` may live on shared storage, but each machine's
 ## What every file is
 
 ```
-tomogration_app.py            The application. A data-driven pipeline (STAGES list) +
-                              a pure command assembler (build_command) + ProjectState
-                              (all filesystem logic) + the PySide6 UI.
+tomogration_app.py            The PySide6 application: main window, job-card canvas,
+                              parameter forms, queue, streaming terminal, inspectors.
+tomogration_core.py           Tiny shared helpers (script paths, tilt-range expansion,
+                              progress-line keys). Bottom of the import DAG.
+tomogration_stages.py         The data-driven pipeline: the STAGES list, per-stage
+                              params/docs/validators, and build_command (the pure
+                              command assembler the command box is seeded from).
+tomogration_project.py        ProjectState — all filesystem inspection/bookkeeping
+                              (status, history, exclusions, groups, mdoc repair).
+tomogration_jobs.py           The job model: the .tomogration_jobs.json store, the
+                              canvas DAG layout, and discovery of outside work.
+tomogration_relion_handoff_skeleton.py  Shared skeleton for the RELION handoff stages.
 tomogration_docs.json         Per-step documentation shown in the left panel.
+tests/                        The no-GPU test suite (python3 tests/run_all.py) —
+                              stubs PySide6 and exercises the pure logic anywhere.
+docs/                         Screenshot + the printable pipeline reference.
 tomogration.sh                Self-locating launcher (finds the venv, sets Qt paths, runs the app).
 tomogration.desktop           XDG desktop-entry template (install.sh fills in the path).
 install.sh                    Builds the venv, fetches Qt libs, registers the launcher.
@@ -171,8 +230,18 @@ ml_imodtowarpkey_generator_warp_auto.py     Build the IMOD→acquisition-order c
 ml_batch_remake_mdocs_warp_auto.sh          Apply tilt exclusions + renumber mdoc ZValues.
 ml_aretomo2_warp_auto.sh                    Parallel AreTomo2 farm (handles the CUDA/setgid traps).
 ml_missalignment_warp_auto.sh               miss-alignment wrapper (train + infer modes).
+ml_cryolo_to_warp_picks_auto.py             Convert crYOLO coordinate files to Warp pick stars.
 ml_relion4_convert_star_warp_auto.sh        Convert the Warp export star to RELION 4 (path rewrite) + build an initial reference.
 ml_relion4_handoff_warp_auto.sh             RELION 4 Class3D handoff (reference prep + launch-root guard + submit).
+ml_relion4_merge_optics.py                  Collapse per-export optics groups in a RELION star.
+ml_relion4_select_picks.py                  Class3D/Select result → per-tomogram Warp pick stars.
+ml_star_check_particles.py                  Verify (and optionally prune) particles a star names.
+ml_verify_reextract.py                      Cross-check a re-extraction against its selection.
+ml_m_check_ctf.py                           M pre-flight: find series whose CTF would crash MCore.
+ml_m_index_versions.py                      Label and index M species/refinement versions.
+ml_m_setup_warp_auto.sh                     Manual M population/source setup helper (not called by the GUI).
+ml_m_bisect_warp_auto.sh                    Manual bisection of an MCore IndexOutOfRange crash (not called by the GUI).
+ml_m_reset_warp_auto.sh                     Move a wedged M setup aside (trash, not delete) for a clean restart.
 ml_add_thumbnails_warp_auto.sh              Carry Tomo5 thumbnails into a merged project, renamed.
 ml_make_training_set_warp_auto.sh           Build a fresh miss-alignment training subset (selected/).
 ml_merge_datasets_warp_auto.sh              Merge multiple grids into one continuously-numbered project.
@@ -182,15 +251,18 @@ ml_merge_datasets_warp_auto.sh              Merge multiple grids into one contin
 
 ## How settings persist
 
-- **Per-step parameters** you edit are saved and restored automatically (in
-  `~/.tomogration.json`). They persist across restarts. A step's **Reset defaults**
-  button discards its saved edits; a newer input version (e.g. a fresh AreTomo
-  folder) automatically supersedes the stored value for that field.
+- **Per-step parameters** you edit are saved and restored automatically, in
+  `.tomogration_params.json` **in the project root** (so they follow the dataset
+  across VMs on shared storage; older per-machine `~/.tomogration.json` edits are
+  migrated once). A step's **Reset defaults** button discards its saved edits; a
+  newer input version (e.g. a fresh AreTomo folder) automatically supersedes the
+  stored value for that field.
 - **`warp_launch`** — how `WarpTools` is invoked on your cluster (e.g.
-  `module load warp && WarpTools`) — is set once from the Tools menu.
-- **Processing history** for a project is stored in `.tomogration_history.json` in
-  the project root; existing outputs are archived (never overwritten) on re-run of
-  the steps that support it.
+  `module load warp && WarpTools`) — is set once from the Tools menu (stored
+  per-machine in `~/.tomogration.json`).
+- **Jobs and the workflow graph** live in `.tomogration_jobs.json` in the project
+  root; **processing history** in `.tomogration_history.json` beside it. Existing
+  outputs are archived (never overwritten) on re-run of the steps that support it.
 
 ---
 
@@ -243,3 +315,33 @@ their own licenses — see the note at the bottom of `LICENSE`.
 
 Tomogration stands on the shoulders of the tools it drives — thanks to the Warp,
 AreTomo, IMOD, and miss-alignment developers.
+
+## Re-extracting a RELION selection (bin4 → bin2 → bin1)
+
+There is one route, and it is the export card itself. Right-click the
+Subset-selection card (or the found-on-disk RELION job) → **Re-extract with
+Warp** / **Build downstream ▸ ts_export_particles**. The card arrives with:
+
+* `input_star` = `Select/jobNNN/particles.star` — Warp reads the star's
+  `rlnCoordinateX/Y/Z`, **subtracts the refined `rlnOriginX/Y/ZAngst` itself**
+  (divided by the star's own `rlnImagePixelSize`), and copies the refined Euler
+  angles into the output star;
+* `coords_angpix` = the star's `rlnImagePixelSize`, read from the file (6.28 for
+  particles first extracted at bin4). The run is refused if it disagrees;
+* `normalized_coords` OFF and the pick-star folder/pattern dropped — a RELION star
+  holds pixel coordinates, and declaring them 0-1 fractions multiplies every one
+  by the tomogram width.
+
+You choose `output_angpix`, `box` and `diameter` (halve the pixel size → double the
+box). Then run **RELION 4: convert STAR + init ref** as after any export; its
+`random_subset_ref.mrc` is now an *oriented* average (the angles came along), so it
+should look like the particle rather than a blob. `ml_verify_reextract.py` pairs the
+two stars and checks `new = (coord − origin/apx) × (apx_old/apx_new)`.
+
+Same extraction code as the crYOLO route (`--input_directory` of normalised pick
+stars + `--normalized_coords`): identical subtomogram reconstruction, identical
+output coordinates (`position_Å / output_angpix`), no pre-rotation on either route.
+The differences are only the coordinate source (fractions × tomogram size vs pixels
+× `coords_angpix`), the shifts (none vs the refined origins), and the angle columns
+(zeros vs refined). The pick-star converter (`ml_relion4_select_picks.py`, modes
+A/B/C) is retired; old cards remain readable.

@@ -123,6 +123,35 @@ def main():
     check("M status never enumerates frames/",
           not any(os.path.basename(t.rstrip("/")) == "frames" for t in touched))
 
+    # ---- ts_ctf dot: an .xml is NOT a CTF fit ------------------------------
+    # The per-series .xml exists right after ts_import/ts_stack; the dot must
+    # stay off until the root tag carries a real CTFResolutionEstimate (the
+    # skipped-ts_ctf → MCore IndexOutOfRangeException trap).
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        wt = root / "warp_tiltseries"
+        wt.mkdir()
+        ps2 = proj.ProjectState(root)
+        (wt / "Position1.xml").write_text('<TiltSeries AreAnglesInverted="False">'
+                                          '</TiltSeries>')
+        n, msg = ps2.status_ts_ctf()
+        check("xml without a CTF fit does not light the dot", n == 0)
+        check("and the message says how many await ts_ctf",
+              "0/1" in (msg or ""))
+        (wt / "Position2.xml").write_text(
+            '<TiltSeries CTFResolutionEstimate="7.6"></TiltSeries>')
+        n, msg = ps2.status_ts_ctf()
+        check("a partial fit still reads not-done", n == 0 and "1/2" in (msg or ""))
+        (wt / "Position1.xml").write_text(
+            '<TiltSeries CTFResolutionEstimate="8.2"></TiltSeries>')
+        n, msg = ps2.status_ts_ctf()
+        check("all fitted lights the dot", n == 2)
+        # An empty attribute is Warp's 'not estimated yet' — must not count.
+        (wt / "Position3.xml").write_text(
+            '<TiltSeries CTFResolutionEstimate=""></TiltSeries>')
+        n, _msg = ps2.status_ts_ctf()
+        check("an empty CTFResolutionEstimate does not count", n == 0)
+
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 

@@ -57,7 +57,7 @@ def main():
               "run_half1_class001.mrc"):          # a FILTERED map, must not be picked
         (jd / f).write_text("")
 
-    orph = {"stage_id": "relion4_to_warp", "kind": "relion_job",
+    orph = {"stage_id": "relion4_result", "kind": "relion_job",
             "suffix": "Refine3D/job029 it5", "dir": "Refine3D/job029",
             "star": "Refine3D/job029/run_it005_data.star", "n_series": 0}
 
@@ -107,7 +107,10 @@ def main():
     down = jobs.DOWNSTREAM.get("relion4_result", [])
     check("downstream offers M mask", "m_mask_create" in down)
     check("downstream offers M species", "m_create_species" in down)
-    check("downstream still offers re-extraction", "relion4_to_warp" in down)
+    check("downstream offers re-extraction, as an export of the star",
+          "ts_export_particles" in down)
+    check("and no retired converter", "relion4_to_warp" not in down
+          and "relion4_select_picks" not in down)
     check("downstream does NOT offer threshold picks", "threshold_picks" not in down)
 
     # ---- and the child params must arrive pre-filled ------------------------
@@ -127,9 +130,11 @@ def main():
     check("derived species params pass validation", spec["validate"](vals) == "",
           spec["validate"](vals))
 
-    re_x = jobs.derive_child_params("relion4_to_warp", "relion4_result", pr, "")
-    check("re-extract gets the particle star",
-          re_x.get("particles_star", "").endswith("run_it005_data.star"))
+    re_x = jobs.derive_child_params("ts_export_particles", "relion4_result", pr, "")
+    check("re-extract (export) gets the particle star as input_star",
+          re_x.get("input_star", "").endswith("run_it005_data.star"))
+    check("and is named after the RELION job",
+          re_x.get("output_processing") == "relion4/Refine3D-job029_{jobid}")
 
     # ---- a Select job (no half maps) must still adopt, with a warning -------
     sd = root / "Select" / "job009"

@@ -246,7 +246,11 @@ with tempfile.TemporaryDirectory() as tmp:
 # warning and stopped.
 st = load("tomogration_stages")
 EXP = next(s for s in st.STAGES if s["id"] == "ts_export_particles")
-bad = {"input_pattern": "*Spike-flower_v2.star", "coords_angpix": "12.56",
+# input_directory is set because the form always supplies one: the validator
+# now also checks that EXACTLY ONE input route is chosen (a RELION star, or a
+# pick-star folder), and a dict with neither is not a state the card can be in.
+bad = {"input_directory": "jobs/J23/matching",
+       "input_pattern": "*Spike-flower_v2.star", "coords_angpix": "12.56",
        "normalized_coords": False, "box": 80, "output_angpix": "3.14",
        "diameter": "150", "output_processing": "relion4/picks_v2",
        "output_star": "relion4/picks_v1/matching.star"}
@@ -264,6 +268,10 @@ check("BOTH problems are reported together",
 
 good = dict(bad, coords_angpix="3.14",
             output_star="relion4/picks_v2/matching.star")
+check("a missing input route is now its own warning",
+      "NO INPUT" in EXP["validate"](dict(bad, input_directory="")))
+check("and with both filled in, the folder is declared ignored",
+      "IGNORED" in EXP["validate"](dict(bad, input_star="s.star")))
 check("a correct export produces no warning at all",
       EXP["validate"](good) == "")
 check("matching tag and coords -> no scale warning",
@@ -273,36 +281,63 @@ check("normalised coords are not compared against the Apx tag",
       "too far" not in EXP["validate"](
           dict(good, normalized_coords=True, coords_angpix="")))
 
-# ---- an export wired to a converter inherits every fiddly value -------------
+# ---- an export built from a RELION result reads the star DIRECTLY -----------
+# The one re-extraction route: Warp takes the RELION star, subtracts the refined
+# rlnOrigin*Angst itself and scales by coords_angpix (= the star's own pixel
+# size, which the app fills in from the file). No pick-star folder, no pattern,
+# no hand conversion — the converter with its three modes is retired.
 d = jobs.derive_child_params(
-    "ts_export_particles", "relion4_select_picks",
-    {"out_dir": "picks_class3_Spike-flower_v2_260803", "suffix": "picks_v2",
-     "coords_angpix": "3.14"}, "jobs/J74")
-check("input_directory comes from the converter's out_dir",
-      d["input_directory"] == "picks_class3_Spike-flower_v2_260803")
-check("input_pattern is built from the converter's suffix",
-      d["input_pattern"] == "*picks_v2.star")
-check("coords_angpix is carried, not retyped", d["coords_angpix"] == "3.14")
+    "ts_export_particles", "relion4_result",
+    {"data_star": "Select/job029/particles.star", "job_dir": "Select/job029"}, "")
+check("input_star is the selection's star",
+      d["input_star"] == "Select/job029/particles.star")
+check("the pick-star folder and pattern are blanked, not inherited",
+      d["input_directory"] == "" and d["input_pattern"] == "")
+check("'0-1 fractions' is OFF for a RELION star", d["normalized_coords"] is False)
+check("coords_angpix is left for the star to supply", d["coords_angpix"] == "")
+check("the export dir is named after the selection",
+      d["output_processing"] == "relion4/Select-job029_{jobid}")
 check("output_star lands inside output_processing",
       d["output_star"].startswith(d["output_processing"] + "/"))
-check("the derived export passes its own validator",
-      EXP["validate"]({**d, "box": 80, "output_angpix": "3.14",
-                       "diameter": "150"}) == "")
-check("relion4_to_warp derives the same way",
-      jobs.derive_child_params("ts_export_particles", "relion4_to_warp",
-                               {"out_dir": "picks", "suffix": "s",
-                                "coords_angpix": "6.28"})["coords_angpix"] == "6.28")
-check("a converter with no coords_angpix omits it rather than guessing",
-      "coords_angpix" not in jobs.derive_child_params(
-          "ts_export_particles", "relion4_to_warp",
-          {"out_dir": "picks", "suffix": "s"}))
+check("a promoted selection (source_star) derives the same way",
+      jobs.derive_child_params(
+          "ts_export_particles", "relion4_result",
+          {"source_star": "Select/job029/particles.star",
+           "job_dir": "Select/job029"}, "")["input_star"]
+      == "Select/job029/particles.star")
+check("with coords_angpix filled in, the derived export passes its validator",
+      EXP["validate"]({**d, "coords_angpix": "6.28", "box": 192,
+                       "output_angpix": "1.57", "diameter": "240"}) == "")
+check("without it, the validator refuses the RELION-star route",
+      "REQUIRED" in EXP["validate"]({**d, "box": 192, "output_angpix": "1.57",
+                                     "diameter": "240"}))
+_cmd = st.build_command(EXP, {**{q["name"]: q.get("default") for q in EXP["params"]},
+                              **d, "coords_angpix": "6.28"})
+check("the command carries --input_star and --coords_angpix and nothing pick-star",
+      "--input_star Select/job029/particles.star" in _cmd
+      and "--coords_angpix 6.28" in _cmd and "--input_directory" not in _cmd
+      and "--input_pattern" not in _cmd and "--normalized_coords" not in _cmd)
 
-# The edge has to exist or the menu never offers it — that is why the export fell
-# back to "newest threshold_picks" and inherited the wrong pick set.
-check("export is downstream of relion4_select_picks",
-      "ts_export_particles" in jobs.DOWNSTREAM["relion4_select_picks"])
-check("export is downstream of relion4_to_warp",
-      "ts_export_particles" in jobs.DOWNSTREAM["relion4_to_warp"])
+# The edges have to exist or the menu never offers them.
+check("export is downstream of a RELION result",
+      "ts_export_particles" in jobs.DOWNSTREAM["relion4_result"])
+check("the retired converters are offered nowhere",
+      "relion4_to_warp" not in jobs.DOWNSTREAM
+      and "relion4_select_picks" not in jobs.DOWNSTREAM
+      and all("relion4_to_warp" not in v and "relion4_select_picks" not in v
+              for v in jobs.DOWNSTREAM.values()))
+check("verify is downstream of an export",
+      "relion4_verify_reextract" in jobs.DOWNSTREAM["ts_export_particles"])
+v = jobs.derive_child_params(
+    "relion4_verify_reextract", "ts_export_particles",
+    {"input_star": "Select/job029/particles.star",
+     "output_star": "relion4/Select-job029_{jobid}/matching.star"},
+    "jobs/J80_ts-export-particles")
+check("verify pairs the export's source star with the star it wrote",
+      v["source_star"] == "Select/job029/particles.star"
+      and v["new_star"] == "relion4/Select-job029_J80_ts-export-particles/matching.star")
+check("and checks WITH recentring, because Warp applied the shifts",
+      v["no_recenter"] is False)
 
 
 # ---- pick-set conventions must not be crossed ------------------------------
@@ -333,43 +368,189 @@ check("a non-RELION pick set is left normalised",
 
 # ---- "Build downstream from this" must actually build something ------------
 # It used to create NO card: it derived params, seeded the builder and stashed the
-# parent for a later build. The menu promises a card, so when none appeared the
-# natural move was to drag one in from the palette — which arrives blank, then
-# picked up the stashed parent. That is how a re-extract ran with no particle star
-# and died on its required positional argument.
-TOWARP = next(s for s in st.STAGES if s["id"] == "relion4_to_warp")
-SELPICK = next(s for s in st.STAGES if s["id"] == "relion4_select_picks")
-
+# parent for a later build. A selection card now feeds the EXPORT directly, and
+# the derivation must tell a selection apart from a folder of pick stars.
 sel_params = {"source_star": "Select/job019/particles.star",
-              "override_suffix": "picks_v5", "tomo_angpix": "6.28"}
-d = jobs.derive_child_params("relion4_to_warp", "ts_template_match",
+              "job_dir": "Select/job019"}
+d = jobs.derive_child_params("ts_export_particles", "ts_template_match",
                              sel_params, "jobs/J71")
-check("a selection card supplies the converter's particle star",
-      d["particles_star"] == "Select/job019/particles.star")
-check("and turns MODE C on", d["relion_coords"] is True)
-check("the derived converter passes its own validator",
-      "No particle star" not in TOWARP["validate"]({**d, "keep_all": True}))
+check("a pre-migration selection card supplies the export's star",
+      d.get("input_star") == "Select/job019/particles.star")
+check("and blanks the pick-star route", d.get("input_directory") == "")
 
-d = jobs.derive_child_params("relion4_select_picks", "ts_template_match",
-                             sel_params, "jobs/J71")
-check("select-good-class gets the star too",
-      d["class_star"] == "Select/job019/particles.star")
+# A re-extract PICK SET also carries source_star, but it is a folder of pick
+# stars: it keeps the pick-star derivation (pixels at the filename's Å/px).
+d = jobs.derive_child_params("ts_export_particles", "ts_template_match",
+                             {"source_star": "Select/job019/particles.star",
+                              "override_suffix": "_picks_v5",
+                              "tomo_angpix": "6.28"}, "jobs/J87")
+check("a re-extract pick set still exports from its folder",
+      d.get("input_directory") == "jobs/J87/matching" and "input_star" not in d)
+check("at its own pixel size, as pixels",
+      d.get("coords_angpix") == "6.28" and d.get("normalized_coords") is False)
 
-# The blank card that actually shipped: no star at all.
-check("a blank converter is rejected before it runs",
-      "No particle star" in TOWARP["validate"]({"keep_all": True,
-                                                "relion_coords": True}))
-check("a blank class-select is rejected too",
-      "No classification star" in SELPICK["validate"]({"classes": "3"}))
-check("the star check fires FIRST, before the mode hints",
-      TOWARP["validate"]({}).startswith("⚠ No particle star"))
+# A template-match / crYOLO parent has no source_star: the pick-star route.
+d = jobs.derive_child_params("ts_export_particles", "ts_template_match",
+                             {"override_suffix": "cryolo", "tomo_angpix": "12.56"},
+                             "jobs/J10")
+check("a plain pick set exports from its matching folder",
+      d.get("input_directory") == "jobs/J10/matching" and "input_star" not in d)
 
-# A template-match / crYOLO parent has no source_star and must not be treated as a
-# selection — there is no RELION star to hand over.
-check("a plain pick set supplies no particle star",
-      "particles_star" not in jobs.derive_child_params(
-          "relion4_to_warp", "ts_template_match",
-          {"override_suffix": "cryolo", "tomo_angpix": "12.56"}, "jobs/J10"))
+# The retired converter stays readable on old cards, is flagged, and refuses.
+TOWARP = next(s for s in st.STAGES if s["id"] == "relion4_to_warp")
+check("the pick-star converter is marked retired", TOWARP.get("legacy") is True)
+check("and says so instead of running", "RETIRED" in TOWARP["validate"]({}))
+check("select-good-class is gone",
+      not any(s["id"] == "relion4_select_picks" for s in st.STAGES))
+
+
+# ---- annotation items construct, and say they carry no data ------------------
+# The canvas paints frames behind cards and notes in front; both are dashed,
+# because a solid line on this canvas means "this job read that job's output".
+tomapp = load("tomogration_app")
+
+
+class _StrictNote(tomapp._NoteItem):
+    _OWN = {"_note", "_canvas", "_press_pos"}
+
+    def __getattr__(self, name):
+        if name in _StrictNote._OWN:
+            raise AttributeError(f"_NoteItem touched self.{name} before __init__ set it")
+        inherited = getattr(super(), "__getattr__", None)
+        if inherited is None:
+            raise AttributeError(name)
+        return inherited(name)
+
+
+class _FakeCanvas:
+    locked = False
+
+
+for kind, colour in (("frame", "violet"), ("note", "amber"), ("note", "octarine")):
+    n = {"id": "N1", "kind": kind, "x": 10, "y": 20, "w": 200, "h": 90,
+         "text": "bin4 n2n", "colour": colour}
+    try:
+        _StrictNote(n, _FakeCanvas())
+        ok, why = True, ""
+    except Exception as e:
+        ok, why = False, f"{type(e).__name__}: {e}"
+    check(f"_NoteItem builds for a {kind}/{colour} {why}", ok)
+
+check("an unknown colour cannot reach the painter without a fallback",
+      "octarine" not in tomapp._NOTE_COLOURS and "amber" in tomapp._NOTE_COLOURS)
+check("every colour the data layer allows has a palette entry",
+      all(c in tomapp._NOTE_COLOURS for c in tomapp.NOTE_COLOURS))
+_f = _StrictNote({"id": "N1", "kind": "frame", "x": 0, "y": 0, "w": 10, "h": 10,
+                  "text": "", "colour": "grey"}, _FakeCanvas())
+_n = _StrictNote({"id": "N2", "kind": "note", "x": 0, "y": 0, "w": 10, "h": 10,
+                  "text": "", "colour": "grey"}, _FakeCanvas())
+check("a frame is built as a frame and a note as a note",
+      _f._note["kind"] == "frame" and _n._note["kind"] == "note")
+
+# ---------------------------------------------------------------------------
+# Notes and frames survive a round trip. These live in the SAME store file as
+# the jobs, so the failures worth guarding are the quiet ones: an id that
+# collides with a job id, a typo'd field becoming part of the record, and a
+# frame drawn in front of the cards it is supposed to sit behind.
+import tempfile                                              # noqa: E402
+from pathlib import Path as _P                               # noqa: E402
+
+with tempfile.TemporaryDirectory() as _td:
+    _root = _P(_td)
+    (_root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
+    _j = tomapp.new_job(_root, "mb_segment", "Segment", {})
+    _n1 = tomapp.add_note(_root, "note", 10, 20, text="check polarity here")
+    _fr = tomapp.add_note(_root, "frame", 0, 0, w=600, h=400, colour="blue")
+
+    check("a note gets an N-id that cannot collide with a job id",
+          _n1["id"].startswith("N") and _n1["id"] != _j["id"])
+    check("ids keep counting past a deletion",
+          tomapp.delete_note(_root, _n1["id"])
+          and tomapp.add_note(_root, "note", 0, 0)["id"] != _n1["id"])
+    check("deleting a note that is already gone says so",
+          not tomapp.delete_note(_root, _n1["id"]))
+
+    _n2 = tomapp.add_note(_root, "note", 5, 5, text="before")
+    tomapp.update_note(_root, _n2["id"], text="after", colour="green",
+                       id="HACKED", created="nonsense")
+    _got = [n for n in tomapp.load_notes(_root) if n["id"] == _n2["id"]][0]
+    check("an edit updates what it should", _got["text"] == "after"
+          and _got["colour"] == "green")
+    check("and silently ignores keys it should not touch",
+          _got["id"] == _n2["id"] and _got["created"] != "nonsense")
+    check("editing a note that does not exist returns nothing",
+          tomapp.update_note(_root, "N999", text="x") is None)
+    check("an unknown colour falls back rather than reaching the painter",
+          tomapp.add_note(_root, "note", 0, 0, colour="octarine")["colour"]
+          == "amber")
+
+    _store = tomapp.load_jobs(_root)
+    _frames, _stickies = tomapp.notes_for_canvas(_store)
+    check("frames and notes are split for painting, frames behind",
+          len(_frames) == 1 and _frames[0]["id"] == _fr["id"]
+          and all(n["kind"] == "note" for n in _stickies))
+    check("a junk entry is dropped rather than drawn in the wrong layer",
+          tomapp.notes_for_canvas({"notes": ["not a dict", {"kind": "wat"}]})
+          == ([], []))
+    check("notes survive alongside the jobs in one store",
+          _j["id"] in tomapp.load_jobs(_root)["jobs"] and len(tomapp.load_notes(_root)) >= 2)
+
+    # A frame is 'about' whatever sits inside it, computed from geometry — so
+    # dragging a card into a branch needs no bookkeeping to be captured by it.
+    _nodes = [{"id": "J1", "x": 100, "y": 100, "w": 200, "h": 80},
+              {"id": "J2", "x": 5000, "y": 5000, "w": 200, "h": 80}]
+    _in = tomapp.cards_inside(_fr, _nodes)
+    check("a frame captures the cards inside it and no others",
+          "J1" in _in and "J2" not in _in)
+    check("ghosts and templates are never captured",
+          "G1" not in tomapp.cards_inside(
+              _fr, [{"id": "G1", "x": 100, "y": 100, "w": 10, "h": 10,
+                     "is_ghost": True}]))
+
+
+# ---------------------------------------------------------------------------
+# A note paints the text it stores. QGraphicsTextItem + setTextWidth stored and
+# reopened perfectly while painting an empty box; the simple-text path used by
+# every card label is what actually renders, so the note uses it too.
+# ---------------------------------------------------------------------------
+_painted = []
+
+
+class _CapturingText:
+    """Stands in for QGraphicsSimpleTextItem to capture what reached the scene."""
+    def __init__(self, text="", parent=None):
+        _painted.append(str(text))
+
+    def __getattr__(self, _n):
+        return lambda *a, **k: None
+
+
+_real_simple = tomapp.QGraphicsSimpleTextItem
+tomapp.QGraphicsSimpleTextItem = _CapturingText
+try:
+    _painted.clear()
+    tomapp._NoteItem({"id": "N9", "kind": "note", "x": 0, "y": 0, "w": 220, "h": 96,
+                   "text": "Here is where I sorted the files to frames, mdocs, "
+                           "and gains", "colour": "amber"}, _FakeCanvas())
+    check("a note paints its own text", bool(_painted) and "sorted" in _painted[0])
+    check("the text is wrapped, not one long line", "\n" in _painted[0])
+    check("every painted line fits the note",
+          all(len(l) * 6 <= 220 - 14 for l in _painted[0].split("\n")))
+
+    _painted.clear()
+    tomapp._NoteItem({"id": "N10", "kind": "note", "x": 0, "y": 0, "w": 220, "h": 96,
+                   "text": "", "colour": "amber"}, _FakeCanvas())
+    check("an empty note paints nothing", _painted == [""])
+
+    _painted.clear()
+    long_text = " ".join(["word"] * 400)
+    tomapp._NoteItem({"id": "N11", "kind": "note", "x": 0, "y": 0, "w": 220, "h": 96,
+                   "text": long_text, "colour": "amber"}, _FakeCanvas())
+    check("a long note is clipped to its own height",
+          len(_painted[0].split("\n")) <= 96 // 14)
+    check("and says it was clipped", _painted[0].endswith("\u2026"))
+finally:
+    tomapp.QGraphicsSimpleTextItem = _real_simple
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

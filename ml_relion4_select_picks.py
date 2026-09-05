@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+# ============================================================================
+# RETIRED 2026-09-02 — tomogration no longer uses this converter.
+#
+# Re-extraction is done by ts_export_particles reading the RELION star DIRECTLY:
+#     WarpTools ts_export_particles --settings warp_tiltseries.settings \
+#         --input_star Select/jobNNN/particles.star --coords_angpix <rlnImagePixelSize> \
+#         --output_angpix <finer> --box <N> --diameter <A> --3d --relative_output_paths \
+#         --output_star relion4/<dir>/matching.star --output_processing relion4/<dir>
+# Warp subtracts the refined rlnOriginX/Y/ZAngst itself (÷ the star's pixel size)
+# and copies the refined angles into the output star; no pick stars are needed.
+# The three modes below produced three coordinate conventions and a silent
+# failure for each. The star-reading helpers (read_star_blocks, particles_block,
+# star_pixel_size) are still imported by the audit tools, which is why the file
+# stays.
+# ============================================================================
 # ml_relion4_select_picks.py
 #
 # Select the "good" particles from a RELION 3D-classification result and turn them
@@ -18,31 +33,30 @@
 #   class label, map each kept particle to its pick by that key, and re-extract in Warp
 #   using Warp's own untouched coordinates.
 #
-# TWO WAYS IN (pick whichever inputs you still have on disk):
+# COORDINATES COME FROM THE RELION STAR, and only from there. The star holds
+# _rlnCoordinateX/Y/Z in a pixel size it states (_rlnImagePixelSize), so the
+# coordinates are copied out, RECENTRED on the refined _rlnOriginXYZAngst
+# offsets, and the refined Eulers carried through as priors. Nothing needs the
+# Warp pick STARs, a matching.star, or the reconstruction dimensions.
 #
-#   MODE A  --picks-dir <matching_cryolo/>   (SIMPLEST, coordinates never touched)
-#       The per-tomogram pick STARs you fed to Export still exist. ts_export_particles
-#       numbers the subtomograms 0000000,0000001,... in the SAME order as the rows of
-#       each pick STAR (no thresholding on the cryolo path), so the 7-digit index in the
-#       RELION _rlnImageName is exactly the 0-based row index in that Position's pick STAR.
-#       We simply drop the rows that aren't in a good class and rewrite each pick STAR.
+#     centred_coord_px = coord_px - origin_angst / pixel_size
 #
-#   MODE B  --from-matching <matching.star> --recon-dir <reconstructions/>   (only needs
-#       files you definitely have). Rebuild the pick STARs directly from matching.star's
-#       good rows. matching.star stores rlnCoordinateXYZ in RECONSTRUCTION pixels; we
-#       re-normalise them (x/nx, y/ny, z/nz from the MRC header) -- the exact inverse of
-#       ml_cryolo_to_warp_picks_auto.py -- so the result is byte-for-byte the same format
-#       Warp already extracted from, and you re-run Export with --normalized_coords.
+# Two older routes were removed on 2026-08-31: one rebuilt the pick STARs from
+# the Warp pick files by row index, the other renormalised a matching.star
+# against the reconstruction dimensions. Each produced a DIFFERENT coordinate
+# convention (pixels vs 0-1 fractions), so the export flag that was right for
+# one silently extracted noise under the other — a well-formed star full of
+# subtomograms cut from the wrong places, refining happily for hours. One path
+# with a stated pixel size removes the choice, and the failure with it.
 #
-# After either mode, re-extract at the finer pixel size, e.g.:
+# Re-extract at the finer pixel size:
 #     WarpTools ts_export_particles \
 #         --settings warp_tiltseries.settings \
 #         --input_directory <OUT_DIR> \
-#         --input_pattern '*_good.star' \
-#         --normalized_coords \            # MODE B output is normalised; MODE A: keep the
-#                                          #   flag only if your ORIGINAL export used it
-#         --output_angpix 3.14 \           # bin2 (was 6.28 = bin4)
-#         --box 160 --diameter <A> \       # bin2 box (was 80)
+#         --input_pattern '*_<suffix>.star' \
+#         --coords_angpix <the A/px this tool reports>   # NOT --normalized_coords
+#         --output_angpix 1.57 \           # bin1 (was 6.28 = bin4)
+#         --box 200 --diameter <A> \       # halving output_angpix DOUBLES the box
 #         --3d --output_processing <relion_project_root>
 #
 # DRY-RUN by default: reports what it would keep per tomogram and writes nothing.
@@ -52,6 +66,7 @@
 
 import argparse
 import glob
+import math
 import os
 import re
 import struct
@@ -214,98 +229,237 @@ def read_pick_star(path):
 
 
 def resolve_stem_for_file(base, known_stems):
+    """Longest stem whose match ends at a real boundary ('_' or '.').
+
+    A bare prefix test over an unordered set is wrong twice with non-zero-padded
+    names: 'Position1' prefix-matches 'Position10_...star', and set iteration
+    order decides which stem wins — filtering one tomogram's picks with another
+    tomogram's row indices."""
+    best = ""
     for s in known_stems:
-        if base.startswith(s):
-            return s
-    return base.split("_")[0]
+        if len(s) > len(best) and base.startswith(s) \
+                and (len(base) == len(s) or base[len(s)] in "_."):
+            best = s
+    return best or base.split("_")[0]
 
 
 # ---------------------------------------------------------------------------
-def mode_a(good, args, known_stems):
-    """Filter existing per-tomogram pick STARs by row index."""
-    picks = sorted(glob.glob(os.path.join(args.picks_dir, args.pattern)))
-    if not picks:
-        sys.exit(f"ERROR: no '{args.pattern}' files in {args.picks_dir}")
-    if args.execute:
-        os.makedirs(args.out_dir, exist_ok=True)
 
-    tot_in = tot_out = files_written = 0
-    for pf in picks:
-        base = os.path.basename(pf)
-        stem = resolve_stem_for_file(base, known_stems)
-        preamble, rows, _ = read_pick_star(pf)
-        keep_idx = good.get(stem, set())
-        max_good = max(keep_idx) if keep_idx else -1
-        if max_good >= len(rows):
-            print(f"!! {stem}: good index {max_good} >= {len(rows)} pick rows -- ORDER "
-                  f"MISMATCH, skipping (use MODE B for this one)")
+
+
+
+# ---------------------------------------------------------------------------
+# MODE A — RE-NORMALISE.  RELION coordinates -> 0-1 fractions.
+# ---------------------------------------------------------------------------
+def mode_a(args):
+    """Write picks as 0-1 FRACTIONS of each tomogram, from the RELION star.
+
+    WHY: the FIRST export of a crYOLO pick set runs with --normalized_coords,
+    because fractions are what the crYOLO converter writes. If the re-extraction
+    also writes fractions, the second export uses exactly the same coordinate
+    flags as the first, and nothing has to agree about a pixel size — a fraction
+    carries none.
+
+    The reconstructions are read only for their DIMENSIONS: a fraction is the
+    coordinate divided by the tomogram's width, height and depth.
+    """
+    blocks = read_star_blocks(args.class_star)
+    pb = particles_block(blocks, need=("rlnCoordinateX", "rlnMicrographName"))
+    if pb is None:
+        sys.exit(f"ERROR: {args.class_star} has no block with _rlnCoordinateX + "
+                 f"_rlnMicrographName")
+    c = pb["cols"]
+    apx = float(args.coords_angpix or star_pixel_size(blocks, pb) or 0)
+    if not apx:
+        sys.exit("ERROR: the star does not state its pixel size — pass "
+                 "--coords-angpix")
+    if not args.recon_dir or not os.path.isdir(args.recon_dir):
+        sys.exit("ERROR: MODE A needs --recon-dir (the reconstructions, read "
+                 "for their dimensions)")
+
+    keep_classes = None
+    if not args.keep_all:
+        keep_classes = {int(x) for x in re.split(r"[,\s]+", args.classes.strip()) if x}
+    cls_i = c.get("rlnClassNumber")
+
+    # One header read per tomogram, cached: 28,850 particles across 71 series
+    # would otherwise reopen the same MRC hundreds of times over a network
+    # filesystem.
+    cache = {}
+
+    def recon_for(stem):
+        if stem in cache:
+            return cache[stem]
+        hits = [h for h in sorted(glob.glob(os.path.join(args.recon_dir,
+                                                         f"{stem}*.mrc")))
+                if os.path.basename(h) == stem + ".mrc"
+                or os.path.basename(h)[len(stem):len(stem) + 1] in "_."]
+        if not hits:
+            cache[stem] = None
+            return None
+        m = re.search(r"_(\d+(?:[.p]\d+)?)Apx", os.path.basename(hits[0]))
+        rapx = float(m.group(1).replace("p", ".")) if m else apx
+        cache[stem] = (mrc_dims(hits[0]), rapx)
+        return cache[stem]
+
+    by_stem, per_class, n_total, missing = {}, {}, 0, set()
+    for r in pb["rows"]:
+        n_total += 1
+        if cls_i is not None:
+            cl = int(float(r[cls_i]))
+            per_class[cl] = per_class.get(cl, 0) + 1
+            if keep_classes is not None and cl not in keep_classes:
+                continue
+        mic = os.path.basename(r[c["rlnMicrographName"]])
+        stem = mic[:-9] if mic.endswith(".tomostar") else os.path.splitext(mic)[0]
+        got = recon_for(stem)
+        if got is None:
+            missing.add(stem)
             continue
-        kept = [rows[i] for i in range(len(rows)) if i in keep_idx]
-        tot_in += len(rows)
-        tot_out += len(kept)
-        out = os.path.join(args.out_dir, base.replace(".star", f"_{args.suffix}.star"))
-        flag = ""
-        if args.execute and kept:
-            with open(out, "w") as fh:
-                fh.write(preamble + "\n" + "\n".join(kept) + "\n")
-            files_written += 1
-            flag = f"  -> {os.path.basename(out)}"
-        print(f"{stem}: {len(kept):5d} / {len(rows):5d} kept{flag}")
-    return tot_in, tot_out, files_written
-
-
-def mode_b(good, args, known_stems):
-    """Rebuild normalised pick STARs from matching.star's good rows."""
-    blocks = read_star_blocks(args.from_matching)
-    mb = particles_block(blocks, need=("rlnImageName", "rlnCoordinateX"))
-    if mb is None:
-        sys.exit(f"ERROR: {args.from_matching} has no _rlnImageName/_rlnCoordinateX block")
-    c = mb["cols"]
-    xi, yi, zi = c["rlnCoordinateX"], c["rlnCoordinateY"], c["rlnCoordinateZ"]
-    ii = c["rlnImageName"]
-    mic_i = c.get("rlnMicrographName")
-
-    # gather good rows per stem
-    by_stem = {}       # stem -> list of (x_px, y_px, z_px, micrograph)
-    for r in mb["rows"]:
-        stem, idx = stem_idx(r[ii])
-        if stem is None or idx not in good.get(stem, set()):
-            continue
-        mic = r[mic_i] if mic_i is not None else f"{stem}.tomostar"
+        (nx, ny, nz), rapx = got
+        # Through ANGSTROMS, never by assuming the star's grid and the
+        # reconstruction's grid are the same one.
+        x, y, z = (float(r[c[f"rlnCoordinate{a}"]]) * apx for a in "XYZ")
         by_stem.setdefault(stem, []).append(
-            (float(r[xi]), float(r[yi]), float(r[zi]), mic))
+            (x / (nx * rapx), y / (ny * rapx), z / (nz * rapx), mic))
 
-    if args.execute:
-        os.makedirs(args.out_dir, exist_ok=True)
+    _report(args, "A", "0-1 FRACTIONS of each tomogram", per_class,
+            keep_classes, n_total, sum(len(v) for v in by_stem.values()))
+    if missing:
+        print(f"!! no reconstruction found for {len(missing)} tomogram(s): "
+              f"{', '.join(sorted(missing)[:5])}"
+              + (" ..." if len(missing) > 5 else ""))
+    print("Export with:    --normalized_coords   and NO --coords_angpix")
+    print("=" * 67)
 
     hdr = ("\ndata_\n\nloop_\n"
            "_rlnCoordinateX #1\n_rlnCoordinateY #2\n_rlnCoordinateZ #3\n"
            "_rlnAngleRot #4\n_rlnAngleTilt #5\n_rlnAnglePsi #6\n"
            "_rlnMicrographName #7\n_rlnAutopickFigureOfMerit #8\n")
+    _write(args, by_stem, hdr, lambda v:
+           f"{v[0]:12.6f} {v[1]:12.6f} {v[2]:12.6f} "
+           f"{0.0:11.5f} {0.0:11.5f} {0.0:11.5f}  {v[3]}  {args.fom:11.5f}")
+    return 0
 
-    tot_out = files_written = 0
-    for stem in sorted(by_stem):
-        mrc = os.path.join(args.recon_dir, f"{stem}_{args.apx}Apx.mrc")
-        if not os.path.exists(mrc):
-            print(f"!! {stem}: reconstruction not found ({os.path.basename(mrc)}); "
-                  f"cannot normalise, skipping")
+
+# ---------------------------------------------------------------------------
+# MODE B — FILTER THE ORIGINALS.  Drop rows, change nothing else.
+# ---------------------------------------------------------------------------
+def mode_b(args):
+    """Filter the ORIGINAL Warp pick STARs down to the particles RELION kept.
+
+    Nothing is recomputed. Each pick star is rewritten verbatim minus the rows
+    that were not selected, so whatever convention it was in — crYOLO writes
+    0-1 fractions — survives untouched, and the re-export uses the same flags
+    as the export that produced it.
+
+    This is the route with a working precedent: EML45, 2026-07-25, filtered
+    picks exported with --normalized_coords.
+    """
+    if not args.picks_dir or not os.path.isdir(args.picks_dir):
+        sys.exit("ERROR: MODE B needs --picks-dir (the ORIGINAL pick stars the "
+                 "first export read)")
+    keep_classes = None
+    if not args.keep_all:
+        keep_classes = {int(x) for x in re.split(r"[,\s]+", args.classes.strip()) if x}
+    good, per_class, n_total, n_kept = good_indices_by_stem(args.class_star,
+                                                            keep_classes)
+    files = sorted(glob.glob(os.path.join(args.picks_dir, args.pattern or "*.star")))
+    if not files:
+        sys.exit(f"ERROR: no pick stars matching '{args.pattern or '*.star'}' in "
+                 f"{args.picks_dir}")
+
+    _report(args, "B", "UNCHANGED from the original pick stars", per_class,
+            keep_classes, n_total, n_kept)
+    print(f"Pick stars:     {len(files)} matching '{args.pattern or '*.star'}'")
+    print("Export with:    the SAME coordinate flags the first export used")
+    print("=" * 67)
+
+    if args.execute:
+        os.makedirs(args.out_dir, exist_ok=True)
+    written = kept_total = 0
+    for f in files:
+        base = os.path.basename(f)
+        stem = resolve_stem_for_file(base, good.keys())
+        idxs = good.get(stem)
+        if not idxs:
             continue
-        nx, ny, nz = mrc_dims(mrc)
-        out_rows = []
-        for x, y, z, mic in by_stem[stem]:
-            out_rows.append(f"{x/nx:12.7f} {y/ny:12.7f} {z/nz:12.7f} "
-                            f"{0.0:11.5f} {0.0:11.5f} {0.0:11.5f}  "
-                            f"{mic}  {args.fom:11.5f}")
-        tot_out += len(out_rows)
-        out = os.path.join(args.out_dir, f"{stem}_{args.apx}Apx_{args.suffix}.star")
-        flag = ""
+        preamble, rows, _n = read_pick_star(f)
+        kept = [r for i, r in enumerate(rows) if i in idxs]
+        if not kept:
+            continue
+        # Keep the ORIGINAL name and only add the suffix, so the Apx tag that
+        # states the coordinate convention travels with the file.
+        out = os.path.join(args.out_dir,
+                           re.sub(r"\.star$", f"_{args.suffix}.star", base))
+        print(f"{stem:24s} {len(kept):6d} / {len(rows):6d} picks  -> "
+              f"{os.path.basename(out)}")
         if args.execute:
             with open(out, "w") as fh:
-                fh.write(hdr + "\n".join(out_rows) + "\n")
-            files_written += 1
-            flag = f"  -> {os.path.basename(out)}"
-        print(f"{stem}: {len(out_rows):5d} kept  (nx,ny,nz={nx},{ny},{nz}){flag}")
-    return None, tot_out, files_written
+                fh.write(preamble + "\n" + "\n".join(kept) + "\n")
+        written += 1
+        kept_total += len(kept)
+    print("-" * 67)
+    print(f"{'Wrote' if args.execute else 'Would write'} {kept_total} picks in "
+          f"{written} star(s) to {args.out_dir}")
+    if written == 0:
+        sys.exit("ERROR: nothing matched. Do --picks-dir and --pattern point at "
+                 "the pick stars the FIRST export read?")
+    return 0
+
+
+def _report(args, mode, convention, per_class, keep_classes, n_total, n_kept):
+    print("=" * 67)
+    print(f"ml_relion4_select_picks    "
+          f"[{'EXECUTE' if args.execute else 'DRY-RUN'}]   MODE {mode}")
+    print(f"RELION star:    {args.class_star}")
+    print(f"Coordinates:    {convention}")
+    print(f"Keep classes:   {'ALL' if keep_classes is None else sorted(keep_classes)}")
+    if per_class:
+        print("Class populations (class: count):")
+        for cl in sorted(per_class):
+            mark = "  <-- keep" if (keep_classes is None or cl in keep_classes) else ""
+            print(f"    class {cl:>3}: {per_class[cl]:6d}{mark}")
+    print(f"Selected {n_kept} / {n_total} particles.")
+    print(f"Output dir:     {args.out_dir}")
+
+
+def _write(args, by_stem, hdr, fmt):
+    if args.execute:
+        os.makedirs(args.out_dir, exist_ok=True)
+    written = 0
+    for stem in sorted(by_stem):
+        rows = [fmt(v) for v in by_stem[stem]]
+        out = os.path.join(args.out_dir, f"{stem}_{args.suffix}.star")
+        print(f"{stem:24s} {len(rows):6d} picks  -> {os.path.basename(out)}")
+        if args.execute:
+            with open(out, "w") as fh:
+                fh.write(hdr + "\n".join(rows) + "\n")
+        written += 1
+    print("-" * 67)
+    print(f"{'Wrote' if args.execute else 'Would write'} "
+          f"{sum(len(v) for v in by_stem.values())} picks in {written} star(s) "
+          f"to {args.out_dir}")
+
+
+def rotate_zyz(x, y, z, rot, tilt, psi):
+    """Rotate a vector by RELION's ZYZ Euler convention (rot, tilt, psi).
+
+    Only used to TEST whether the refined origin lives in the particle frame
+    rather than in tomogram axes. RELION composes R = Rz(rot) Ry(tilt) Rz(psi);
+    this applies that matrix to the offset vector."""
+    a, b, c = (math.radians(v) for v in (rot, tilt, psi))
+    ca, sa = math.cos(a), math.sin(a)
+    cb, sb = math.cos(b), math.sin(b)
+    cc, sc = math.cos(c), math.sin(c)
+    m = (
+        (ca * cb * cc - sa * sc, -ca * cb * sc - sa * cc, ca * sb),
+        (sa * cb * cc + ca * sc, -sa * cb * sc + ca * cc, sa * sb),
+        (-sb * cc,                sb * sc,                cb),
+    )
+    return (m[0][0] * x + m[0][1] * y + m[0][2] * z,
+            m[1][0] * x + m[1][1] * y + m[1][2] * z,
+            m[2][0] * x + m[2][1] * y + m[2][2] * z)
 
 
 def mode_c(args):
@@ -366,9 +520,19 @@ def mode_c(args):
         if recenter:
             dx, dy, dz = float(r[ox]), float(r[oy]), float(r[oz])
             max_shift = max(max_shift, abs(dx), abs(dy), abs(dz))
-            x -= dx / apx
-            y -= dy / apx
-            z -= dz / apx
+            if args.recenter_frame == "rotated" and have_angles:
+                # HYPOTHESIS UNDER TEST: the refined origin is expressed in the
+                # particle's own rotated frame, not in tomogram axes. If so it
+                # must be rotated by that particle's Eulers before it can be
+                # subtracted from a tomogram coordinate. Applying it unrotated
+                # displaces every particle in a different wrong direction --
+                # which is what a flattened average looks like.
+                dx, dy, dz = rotate_zyz(dx, dy, dz, float(r[rot]),
+                                        float(r[tilt]), float(r[psi]))
+            sgn = args.recenter_sign
+            x -= sgn * dx / apx
+            y -= sgn * dy / apx
+            z -= sgn * dz / apx
         ang = ((float(r[rot]), float(r[tilt]), float(r[psi])) if keep_ang
                else (0.0, 0.0, 0.0))
         mic = os.path.basename(r[mic_i])
@@ -384,10 +548,26 @@ def mode_c(args):
           f"(and NO --normalized_coords)")
     print(f"Recentre:       {'YES (refined origins applied)' if recenter else 'no'}"
           f"{'  [no origin columns in star]' if args.recenter and not have_origins else ''}")
-    print(f"Carry angles:   {'YES (refined Eulers as priors)' if keep_ang else 'no'}"
-          f"{'  [no angle columns in star]' if args.keep_angles and not have_angles else ''}")
+    if keep_ang:
+        print("Carry angles:   YES -- WARNING: Warp ORIENTS each subtomogram "
+              "by these, and RELION then rotates it again.")
+        print("                Expect a featureless reference. Drop them and "
+              "attach with ml_merge_angles.py after export.")
+    else:
+        print("Carry angles:   no (correct -- Warp needs UNORIENTED picks)")
+        if have_angles:
+            print("                the refined Eulers are in the source star; "
+                  "attach them to the EXPORTED star with ml_merge_angles.py")
     if recenter:
         print(f"Largest shift:  {max_shift:.1f} Å")
+        print(f"                sign {args.recenter_sign:+g}, frame "
+              f"'{args.recenter_frame}'")
+        print("                WARNING: recentring is OFF by default because "
+              "it produced a featureless")
+        print("                reference here. You have opted back in.")
+    elif have_origins:
+        print("                (the star's refined origins were IGNORED, which "
+              "is what works)")
     print(f"Keep classes:   {'ALL' if keep_classes is None else sorted(keep_classes)}")
     if per_class:
         print("Class populations (class: count):")
@@ -443,43 +623,122 @@ def main():
                          "--keep-all to just split every classified particle back to picks)")
     ap.add_argument("--keep-all", action="store_true",
                     help="ignore class label; keep every particle present in class_star")
-    # Mode A
+    # Accepted and ignored: this is now the only behaviour. Kept so the saved
+    # jobs and cards that still pass it keep running instead of erroring on an
+    # unrecognised flag.
+    # THE MODE. Three ways to get coordinates out of a RELION selection, each
+    # with a DIFFERENT output convention -- and choosing wrong is silent, so it
+    # is one explicit choice rather than something inferred from which other
+    # flags happen to be set.
+    ap.add_argument("--mode", choices=("A", "B", "C"),
+                    default=env_default("MODE", "B"),
+                    help="A = re-normalise: write 0-1 FRACTIONS (export with "
+                         "--normalized_coords). "
+                         "B = filter the ORIGINAL pick stars verbatim, keeping "
+                         "their convention (export with the same flags the "
+                         "first export used) -- the route with a working "
+                         "precedent. "
+                         "C = coordinates straight from the RELION star as "
+                         "PIXELS (export with --coords_angpix).")
     ap.add_argument("--picks-dir", default=env_default("PICKS_DIR", ""),
-                    help="MODE A: dir of the per-tomogram pick STARs fed to Export")
-    ap.add_argument("--pattern", default=env_default("PICK_PATTERN", "*_cryolo.star"),
-                    help="MODE A: pick-STAR glob within --picks-dir (default *_cryolo.star)")
-    # Mode C (recommended): coordinates straight from the RELION star
-    ap.add_argument("--relion-coords", action="store_true",
-                    default=env_default("RELION_COORDS", "0") == "1",
-                    help="MODE C: take coordinates from the RELION star itself (already "
-                         "in a known Å/px), recentred on the refined origins and carrying "
-                         "the refined angles. Needs no pick stars, no matching.star and no "
-                         "reconstruction dims. Export with --coords_angpix, NOT normalised.")
+                    help="MODE B: the ORIGINAL pick stars the first export read.")
+    ap.add_argument("--pattern", default=env_default("PATTERN", "*.star"),
+                    help="MODE B: glob for those pick stars.")
+    ap.add_argument("--recon-dir", default=env_default("RECON_DIR", ""),
+                    help="MODE A: the reconstructions, read ONLY for their "
+                         "dimensions (a fraction is coord / tomogram size).")
+    ap.add_argument("--relion-coords", action="store_true", default=True,
+                    help="(no longer optional — coordinates always come from the "
+                         "RELION star; accepted for compatibility)")
     ap.add_argument("--coords-angpix", default=env_default("COORDS_ANGPIX", ""),
-                    help="MODE C: override the coords' Å/px (default: read from the star's "
+                    help="override the coords' Å/px (default: read from the star's "
                          "_rlnImagePixelSize / _rlnPixelSize).")
     ap.add_argument("--no-recenter", dest="recenter", action="store_false",
-                    default=env_default("RECENTER", "1") == "1",
-                    help="MODE C: do NOT apply the refined _rlnOriginXYZAngst offsets. "
-                         "Default is to apply them (re-extract on the refined centre).")
+                    default=env_default("RECENTER", "0") == "1",
+                    help="do NOT apply the refined _rlnOriginXYZAngst offsets. "
+                         "This is now the DEFAULT — see --recenter.")
+    # DEFAULT OFF, and it took a ruined classification to learn why.
+    #
+    # Warp uses the angles in a pick star to ORIENT each subtomogram it
+    # reconstructs. Carry the refined Eulers here and the volumes come out
+    # already rotated into the reference frame — then RELION applies the same
+    # angles again as priors and every particle is rotated twice, by a
+    # different amount each. Positions stay perfect (verified to 0.000 px), so
+    # nothing errors and nothing looks wrong until a classification ten
+    # iterations in is grinding on mush.
+    #
+    # The tell is relion_reconstruct on a random subset: with angles ZERO it
+    # averages the subtomograms and shows clear central density; with angles
+    # carried it is featureless noise.
+    #
+    # The refined orientations are still worth having — they just belong in
+    # the EXPORTED star, after extraction, not in the pick star that Warp
+    # reads. ml_merge_angles.py puts them there.
+    # DEFAULT OFF, established by elimination on 2026-09-02 after a
+    # re-extraction produced a featureless reference and a ruined
+    # classification. Reference skew (max/|min| of a 40 A low-passed
+    # 1000-particle reconstruction; ~1.8 means a centred object, ~0.9 means
+    # noise):
+    #
+    #   bin4 crYOLO, normalized coords, no recentre     2.01  centred
+    #   bin1 crYOLO, normalized coords, no recentre     1.77  centred
+    #   bin1 crYOLO, coords_angpix,     no recentre     1.81  centred
+    #   bin4 SELECTED particles, origins zeroed         1.79  centred
+    #   bin1 re-extract, coords_angpix, RECENTRED       0.86  FLAT
+    #
+    # Every arrangement without recentring is centred, across two pixel sizes,
+    # two coordinate conventions and both particle sets. The one with it is the
+    # only failure. WHY it fails is not established: coord - origin/angpix is
+    # RELION's documented convention and the shifts are small (~20 A typical,
+    # 99.8 A max, about 3 px at bin4), so a plain sign inversion would blur the
+    # average rather than flatten it. The origin is likely expressed in a frame
+    # that is not the tomogram's axes. Until someone settles that, do not do it.
+    #
+    # Skipping it costs almost nothing: particles keep their original pick
+    # centres -- exactly what produced the good map -- and the next refinement
+    # finds the shifts again.
+    # Two candidate explanations for why recentring destroys the average, kept
+    # as switches so ONE export settles it instead of another argument. Both
+    # displace a particle by a similar amount, which is why the resulting maps
+    # look the same and reasoning cannot separate them.
+    ap.add_argument("--recenter-sign", type=float, default=1.0,
+                    help="1 subtracts the origin (RELION's documented "
+                         "convention); -1 adds it. Use -1 to test whether the "
+                         "sign is inverted here.")
+    ap.add_argument("--recenter-frame", choices=("tomogram", "rotated"),
+                    default="tomogram",
+                    help="'tomogram' applies the origin along tomogram axes. "
+                         "'rotated' first rotates it by the particle's Eulers, "
+                         "testing whether the origin is expressed in the "
+                         "particle's own frame.")
+    ap.add_argument("--recenter", dest="recenter", action="store_true",
+                    help="apply the refined _rlnOriginXYZAngst offsets. OFF by "
+                         "default: doing this produced a featureless reference "
+                         "and a classification on noise, while every run "
+                         "without it reconstructed cleanly. Opt in only to "
+                         "test the frame convention.")
+    ap.add_argument("--keep-angles", dest="keep_angles", action="store_true",
+                    default=env_default("KEEP_ANGLES", "0") == "1",
+                    help="carry the refined Euler angles into the pick stars. "
+                         "OFF by default: Warp ORIENTS each subtomogram by "
+                         "them, so RELION then rotates an already-rotated "
+                         "particle and the reconstruction is noise. Use "
+                         "ml_merge_angles.py to attach them to the exported "
+                         "star instead.")
     ap.add_argument("--no-keep-angles", dest="keep_angles", action="store_false",
-                    default=env_default("KEEP_ANGLES", "1") == "1",
-                    help="MODE C: do NOT carry the refined Euler angles into the pick "
-                         "stars. Default is to carry them as priors.")
-    # Mode B
-    ap.add_argument("--from-matching", default=env_default("FROM_MATCHING", ""),
-                    help="MODE B: matching.star to rebuild pick STARs from")
-    ap.add_argument("--recon-dir", default=env_default("RECON_DIR", ""),
-                    help="MODE B: reconstruction dir (PositionNNN_<apx>Apx.mrc) to normalise by")
-    ap.add_argument("--apx", default=env_default("APX", "12.56"),
-                    help="MODE B: angpix filename tag of the reconstructions (default 12.56)")
-    ap.add_argument("--fom", type=float, default=float(env_default("FOM", "1.0")),
-                    help="MODE B: constant _rlnAutopickFigureOfMerit (default 1.0)")
+                    help="explicit form of the default (kept so existing "
+                         "commands and saved job cards still run).")
     # common
     ap.add_argument("--out-dir", default=env_default("OUT_DIR", ""),
                     help="output dir for the filtered/rebuilt pick STARs (required)")
     ap.add_argument("--suffix", default=env_default("SUFFIX", "good"),
                     help="tag added to output filenames (default 'good')")
+    ap.add_argument("--fom", type=float, default=float(env_default("FOM", "1.0")),
+                    help="constant _rlnAutopickFigureOfMerit written for every "
+                         "pick (default 1.0). These coordinates come from a "
+                         "RELION selection you already curated, so there is no "
+                         "per-particle score left to carry — the column exists "
+                         "because the format has it.")
     ap.add_argument("--execute", action="store_true",
                     help="write the STARs (default is a dry run that writes nothing)")
     args = ap.parse_args()
@@ -492,61 +751,17 @@ def main():
             sys.exit("ERROR: give --classes '1,3' (the good class numbers) or --keep-all")
         keep_classes = {int(x) for x in re.split(r"[,\s]+", args.classes.strip()) if x}
 
-    use_c = bool(args.relion_coords)
-    use_a = bool(args.picks_dir) and not use_c
-    use_b = bool(args.from_matching) and not use_c
-    if not use_c and use_a == use_b:
-        sys.exit("ERROR: choose exactly one of MODE C (--relion-coords, recommended), "
-                 "MODE A (--picks-dir) or MODE B (--from-matching + --recon-dir)")
-    if use_b and not args.recon_dir:
-        sys.exit("ERROR: MODE B needs --recon-dir (to normalise coordinates)")
+    # --relion-coords used to BE the mode switch; honour it as MODE C so saved
+    # job cards and old commands keep doing what they did.
+    mode = (args.mode or "B").upper()
+    # `flag`, not `a`: every other tool here binds `a = ap.parse_args()`, so a
+    # loop variable of that name reads as the args namespace at a glance.
+    if args.relion_coords and not any(f.startswith("--mode") for f in sys.argv):
+        mode = "C"
     if not args.out_dir:
         sys.exit("ERROR: --out-dir is required")
     args.out_dir = os.path.abspath(args.out_dir)
-
-    if use_c:                       # MODE C reads everything it needs from the star
-        mode_c(args)
-        return
-
-    good, per_class, n_total, n_kept = good_indices_by_stem(args.class_star, keep_classes)
-    known_stems = set(good.keys())
-
-    mode = "EXECUTE" if args.execute else "DRY-RUN"
-    print("===================================================================")
-    print(f"ml_relion4_select_picks    [{mode}]   MODE {'A' if use_a else 'B'}")
-    print(f"Classification: {args.class_star}")
-    print(f"Keep classes:   {'ALL' if keep_classes is None else sorted(keep_classes)}")
-    print(f"Output dir:     {args.out_dir}")
-    print("Class populations (class: count):")
-    for cl in sorted(per_class):
-        mark = "  <-- keep" if (keep_classes is None or cl in keep_classes) else ""
-        print(f"    class {cl:>3}: {per_class[cl]:6d}{mark}")
-    print(f"Selected {n_kept} / {n_total} particles across {len(good)} tomograms.")
-    print("===================================================================")
-
-    if use_a:
-        tot_in, tot_out, nfiles = mode_a(good, args, known_stems)
-    else:
-        tot_in, tot_out, nfiles = mode_b(good, args, known_stems)
-
-    print("-------------------------------------------------------------------")
-    if tot_in is not None:
-        print(f"Kept {tot_out} / {tot_in} pick rows.")
-    else:
-        print(f"Wrote {tot_out} picks.")
-    if not args.execute:
-        print("DRY-RUN - nothing written. Re-run with --execute to write the STARs.")
-        return
-    print(f"Wrote {nfiles} pick STARs to {args.out_dir}")
-    print("Next: re-extract at the finer pixel size with ts_export_particles:")
-    print(f"    --input_directory {args.out_dir}")
-    print(f"    --input_pattern   '*_{args.suffix}.star'")
-    if use_b:
-        print(f"    --normalized_coords        (MODE B coords are 0-1 fractions)")
-    else:
-        print(f"    --normalized_coords        (KEEP only if your ORIGINAL export used it)")
-    print(f"    --output_angpix <finer>  --box <finer box>  --diameter <A>  --3d")
-    print("Verify ONE tomogram's re-extracted positions land on particles before trusting all.")
+    return {"A": mode_a, "B": mode_b, "C": mode_c}[mode](args)
 
 
 if __name__ == "__main__":

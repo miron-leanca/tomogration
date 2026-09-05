@@ -67,6 +67,8 @@ class Win(app.Tomogration):
         # getattr() with a permissive object rather than None, so "is None" checks
         # silently pass on garbage.
         self._builder_job_id = None
+        self._builder_bindings = {}
+        self._form_job_params = None
         self._showing_job = None
         self._exact_params_for = None
 
@@ -91,18 +93,35 @@ class Win(app.Tomogration):
         pass
 
     def _select_stage(self, spec):
-        # Mirrors the real one's binding handshake. STICKY, not one-shot: the
-        # binding is re-validated on every rebuild and survives while the form is
-        # still on that job's stage and the job can still change.
+        # Mirrors the real one's binding handshake. STICKY and PER-STAGE: each
+        # stage remembers its editable card, so a detour to another stage no
+        # longer drops the binding; it dies only when the job stops being
+        # editable. The clicked card's params arrive as a one-shot overlay
+        # (captured in _form_shown), never by writing the param store.
         self._selected = spec["id"]
+        bindings = getattr(self, "_builder_bindings", None)
+        if bindings is None:
+            bindings = self._builder_bindings = {}
+        jobs = app.load_jobs(self.project_root).get("jobs") or {}
         want = getattr(self, "_builder_job_id", None)
-        bound = None
         if want:
-            j = (app.load_jobs(self.project_root).get("jobs") or {}).get(want)
+            j = jobs.get(want)
+            if j:
+                bindings[j.get("stage_id")] = want
+        bound = None
+        cand = bindings.get(spec["id"])
+        if cand:
+            j = jobs.get(cand)
             if (j and j.get("status") in ("building", "queued")
                     and j.get("stage_id") == spec["id"]):
-                bound = want
+                bound = cand
+            else:
+                bindings.pop(spec["id"], None)
         self._builder_job_id = bound
+        ov = getattr(self, "_form_job_params", None)
+        self._form_job_params = None
+        self._form_shown = (ov["params"]
+                            if ov and ov.get("stage") == spec["id"] else None)
         self.current = {"spec": spec, "job_id": bound, "manual": False}
 
     def _persist_param_store(self):
@@ -356,10 +375,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("job run reports its job id", info.get("job_id") == jrun["id"])
     check("job run label names the job", jrun["id"] in info.get("label", ""))
 
-    # ---- _apply_layout + _show_card_details (Phase 3 layout) ---------------
+    # ---- _apply_layout + the pop-out panels (canvas rework) -----------------
     # Exercise the real method bodies with controlled fakes (the stub can't run
     # a full window: `while layout.count()` never ends on a _Perm). Catches
-    # attribute typos / bad references in the layout + details code.
+    # attribute typos / bad references in the layout + popout code.
     class FakeLayout:
         def __init__(self):
             self.widgets = []
@@ -367,7 +386,7 @@ with tempfile.TemporaryDirectory() as tmp:
             return 0                     # always "empty" so _clear_box exits
         def takeAt(self, i):
             return None
-        def addWidget(self, w):
+        def addWidget(self, w, *a):
             self.widgets.append(w)
     class FakeW:
         def __init__(self):
@@ -385,22 +404,60 @@ with tempfile.TemporaryDirectory() as tmp:
         def setSizes(self, s):
             self.sizes = s
 
+    class _Pt:
+        def x(self):
+            return 100
+        def y(self):
+            return 100
+    class _Geo:
+        def topLeft(self):
+            return _Pt()
+
+    class FakePop:
+        """Stands in for JobPopout: records what _open_job_popout does with it
+        (the real one builds Qt widgets, which the stub cannot lay out)."""
+        def __init__(self, app_, node):
+            self.app = app_
+            self.node = dict(node)
+            self.node_id = node.get("id") or f"ghost:{node.get('stage_id')}"
+            self.shown = False
+            self.tab = None
+            self.refreshed = 0
+        def refresh(self, node=None, force=False):
+            self.refreshed += 1
+        def show_tab(self, name):
+            self.tab = name
+        def show(self):
+            self.shown = True
+        def raise_(self):
+            pass
+        def activateWindow(self):
+            pass
+        def move(self, *a):
+            pass
+
+    class _FakeCanvas:
+        _node_index = {}
+        view = None
+
     class LWin(app.Tomogration):
         def __init__(self):
             self._view_mode = "lists"
             self.job_stack = FakeW()
-            self.details_card = FakeW()
+            self.outline_card = FakeW()
             self.docs_card = FakeW(); self.align_list_card = FakeW()
             self.command_card = FakeW(); self.dir_card = FakeW()
             self.terminal_card = FakeW(); self.queue_card = FakeW()
-            self._panels = [self.job_stack, self.details_card, self.docs_card,
+            self._panels = [self.job_stack, self.outline_card, self.docs_card,
                             self.align_list_card, self.command_card, self.dir_card,
                             self.terminal_card, self.queue_card]
             self._stash = FakeW()
             self._layout_host_v = FakeLayout()
             self._act_canvas = FakeW()
-            self._canvas_split = None
-            self.details_box = FakeLayout()
+            self._popouts = {}
+            self.canvas = _FakeCanvas()
+            self.project_root = root
+            self._docs = {}
             self._cfg = {}
         def _load_config(self):
             return dict(self._cfg)
@@ -408,31 +465,108 @@ with tempfile.TemporaryDirectory() as tmp:
             self._cfg = dict(cfg)
         def _refresh_canvas(self):
             pass
+        def geometry(self):
+            return _Geo()
 
     try:
         lw = LWin()
         lw._apply_layout("canvas")
         canvas_mode = (lw._view_mode == "canvas" and lw._cfg.get("view_mode") == "canvas")
-        lw._canvas_split = FakeW()       # _apply_layout set a stub splitter; use a real width()
-        lw._show_card_details({"id": "J01", "stage_id": "ts_reconstruct",
-                               "label": "Reconstruct", "group": "7. Reconstruct",
-                               "is_ghost": False, "status": "completed",
-                               "summary": {"tomograms": 5, "angpix": "10.00"}})
-        details_shown = (lw.details_card.visible is True)
-        lw._show_card_details({"id": "ghost:aretomo", "stage_id": "aretomo",
-                               "label": "AreTomo", "group": "5. Alignment",
-                               "is_ghost": True, "status": "ghost", "summary": {}})
         lw._apply_layout("lists")
         back_to_lists = (lw._view_mode == "lists")
         layout_ok = True
-    except Exception as e:
+    except Exception:
         import traceback
         traceback.print_exc()
-        layout_ok = canvas_mode = details_shown = back_to_lists = False
+        layout_ok = canvas_mode = back_to_lists = False
     check("_apply_layout runs both modes without throwing", layout_ok)
     check("_apply_layout sets + persists canvas mode", canvas_mode)
-    check("_show_card_details reveals the details pane", details_shown)
     check("_apply_layout toggles back to lists", back_to_lists)
+
+    # _open_job_popout: real body, fake JobPopout — registry, retarget, tabs.
+    real_popout_cls = app.JobPopout
+    try:
+        app.JobPopout = FakePop
+        lw = LWin()
+        node = {"id": "J01", "stage_id": "ts_reconstruct",
+                "label": "Reconstruct", "group": "7. Reconstruct",
+                "is_ghost": False, "status": "completed",
+                "summary": {"tomograms": 5}}
+        lw._open_job_popout(node, tab="details")
+        p1 = lw._popouts.get("J01")
+        popout_made = (p1 is not None and p1.shown and p1.tab == "details")
+        lw._open_job_popout(node)                     # second open = same panel
+        popout_reused = (lw._popouts.get("J01") is p1 and p1.refreshed >= 1)
+        lw._open_job_popout("aretomo")                # bare stage id = ghost panel
+        popout_ghost = ("ghost:aretomo" in lw._popouts)
+        # canvas-mode card clicks route to the popout, not the dead builder
+        lw._view_mode = "canvas"
+        lw._canvas_pick(node)
+        popout_routed = (lw._popouts.get("J01") is p1)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        popout_made = popout_reused = popout_ghost = popout_routed = False
+    finally:
+        app.JobPopout = real_popout_cls
+    check("_open_job_popout builds + shows a panel on the asked tab", popout_made)
+    check("re-opening a node reuses its panel (no duplicates)", popout_reused)
+    check("a bare stage id opens a ghost panel", popout_ghost)
+    check("canvas-mode card click routes to the popout", popout_routed)
+
+    # The popout tab populators: real bodies over fake boxes (typo net).
+    try:
+        lw = LWin()
+        box = FakeLayout()
+        lw._populate_details_box(box, {"id": "J01", "stage_id": "ts_reconstruct",
+                                       "label": "Reconstruct",
+                                       "group": "7. Reconstruct",
+                                       "is_ghost": False, "status": "completed",
+                                       "summary": {}})
+        details_real = len(box.widgets) > 0
+        box2 = FakeLayout()
+        lw._populate_details_box(box2, {"id": "ghost:aretomo", "stage_id": "aretomo",
+                                        "label": "AreTomo", "group": "5. Alignment",
+                                        "is_ghost": True, "status": "ghost",
+                                        "summary": {}})
+        details_ghost = len(box2.widgets) > 0
+        box3 = FakeLayout()
+        lw._populate_outputs_box(box3, {"id": "J01", "stage_id": "ts_reconstruct",
+                                        "is_ghost": False, "summary": {}})
+        outputs_real = len(box3.widgets) > 0
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        details_real = details_ghost = outputs_real = False
+    check("_populate_details_box fills a real job's tab", details_real)
+    check("_populate_details_box fills a ghost's tab", details_ghost)
+    check("_populate_outputs_box fills the outputs tab", outputs_real)
+
+    # _smart_path_value: the drop coercions (pure logic, worth real asserts).
+    try:
+        lw = LWin()
+        p_dir = {"name": "tomo_dir", "kind": "text",
+                 "title": "Tomogram folder", "_spec": {}}
+        v1, n1 = lw._smart_path_value(p_dir, {"path": "recs/tomo1.mrc",
+                                              "is_dir": False})
+        coerce_dir = (v1 == "recs" and "folder" in (n1 or ""))
+        p_abs = {"name": "exclusion_file", "kind": "text",
+                 "_spec": {"abs_paths": ["exclusion_file"]}}
+        v2, _n2 = lw._smart_path_value(p_abs, {"path": "mdocs/exclusion_list.txt",
+                                               "is_dir": False})
+        coerce_abs = v2 == str(Path(root) / "mdocs/exclusion_list.txt")
+        p_rel = {"name": "input_star", "kind": "text", "_spec": {}}
+        v3, _n3 = lw._smart_path_value(
+            p_rel, {"path": str(Path(root) / "relion4/run_data.star"),
+                    "is_dir": False})
+        coerce_rel = v3 == "relion4/run_data.star"
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        coerce_dir = coerce_abs = coerce_rel = False
+    check("drop coercion: file into a folder param takes its folder", coerce_dir)
+    check("drop coercion: abs_paths param gets an absolute path", coerce_abs)
+    check("drop coercion: in-project absolute path goes relative", coerce_rel)
 
 # ---- dropping a card onto the canvas is not a run ---------------------------
 # A card dragged in from the palette used to inherit _effective_params — the LAST
@@ -443,8 +577,8 @@ with tempfile.TemporaryDirectory() as td:
     root = Path(td)
     (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
     w = Win(root)
-    w._param_store = {"relion4_to_warp": {"out_dir": "picks_from_a_previous_round",
-                                          "suffix": "old_v3"}}
+    w._param_store = {"relion4_convert": {"project_dir": "relion4/previous_round",
+                                          "starfile": "old.star"}}
     w._persist_param_store = lambda: None
     w._refresh_canvas = lambda: None
     w._select_stage = lambda spec: None
@@ -452,27 +586,181 @@ with tempfile.TemporaryDirectory() as td:
     w._confirm_overwrite = lambda spec, params: (asked.append("overwrite"), True)[1]
     w._confirm_validator = lambda spec, params: (asked.append("validate"), True)[1]
 
-    w._add_stage_from_palette("relion4_to_warp", 500.0, 300.0)
+    w._add_stage_from_palette("relion4_convert", 500.0, 300.0)
     built = [j for j in app.load_jobs(root)["jobs"].values()
-             if j["stage_id"] == "relion4_to_warp"]
+             if j["stage_id"] == "relion4_convert"]
     check("palette drop creates exactly one job", len(built) == 1)
     check("dropping a card asks nothing", asked == [])
-    spec = next(s for s in app.STAGES if s["id"] == "relion4_to_warp")
+    spec = next(s for s in app.STAGES if s["id"] == "relion4_convert")
     check("a dropped card uses template defaults, not the last run's values",
-          built[0]["params"].get("out_dir")
-          == app.stage_defaults(spec).get("out_dir"))
-    check("the previous round's out_dir is NOT inherited",
-          built[0]["params"].get("out_dir") != "picks_from_a_previous_round")
+          built[0]["params"].get("project_dir")
+          == app.stage_defaults(spec).get("project_dir"))
+    check("the previous round's project_dir is NOT inherited",
+          built[0]["params"].get("project_dir") != "relion4/previous_round")
     check("the dropped card is building, never run",
           built[0]["status"] == "building")
     check("and it is pinned where it was dropped",
           app.load_jobs(root)["positions"][built[0]["id"]][0] < 500.0)
 
+    # "＋ Create job (edit, run later)" is the menu twin of a palette drop: it
+    # only places a card. Asking "Run anyway?" to create one read as if the run
+    # had already started — the pre-flight checks belong at the run button.
+    asked.clear()
+    opened = []
+    w._open_job_in_builder = lambda jid, sid: opened.append((jid, sid))
+    n_before = len(app.load_jobs(root)["jobs"])
+    w._create_job_card("relion4_convert")
+    jobs = app.load_jobs(root)["jobs"]
+    fresh = max(jobs.values(), key=lambda j: j["created"] + j["id"])
+    check("create-job adds exactly one card", len(jobs) == n_before + 1)
+    check("creating a card asks nothing", asked == [])
+    check("the created card is building, never run", fresh["status"] == "building")
+    check("the created card opens in the builder for editing",
+          opened and opened[-1][1] == "relion4_convert")
+
     # Building the same stage the NORMAL way must still ask.
     asked.clear()
-    w._build_job("relion4_to_warp", params={"out_dir": "x"}, run=False)
+    w._build_job("relion4_convert", params={"project_dir": "x"}, run=False)
     check("a normal build still runs the pre-flight checks",
           asked == ["validate", "overwrite"])
+
+# ---- the variant sweep: one card per COMBINATION -----------------------------
+# The grid logic is pure (it reads value getters, not widgets), so it tests
+# without a screen. The trap it guards: variants of a step whose output path is
+# a parameter all write to the SAME folder and silently overwrite each other.
+_SWEEP_SPEC = {
+    "id": "mb_deconv", "label": "Deconvolve",
+    "params": [{"name": "input_dir", "kind": "text", "title": "Tomograms"},
+               {"name": "MB_STRENGTH", "kind": "env", "title": "Strength"},
+               {"name": "MB_FALLOFF", "kind": "env", "title": "Falloff"},
+               {"name": "output_dir", "kind": "text", "title": "Output"}],
+    "output_params": ["output_dir"],
+}
+
+
+class _Box:                       # stands in for the suffix checkbox
+    def __init__(self, on): self.on = on
+    def isChecked(self): return self.on
+
+
+def _sweep(rows, suffix=True):
+    d = app.VariantsDialog.__new__(app.VariantsDialog)
+    d.spec = _SWEEP_SPEC
+    d.suffix_cb = _Box(suffix)
+    d.rows = {k: [(None, (lambda v=v: v)) for v in vals] for k, vals in rows.items()}
+    return d
+
+
+d = _sweep({"input_dir": ["recon"], "MB_STRENGTH": ["0.5", "1.0", "1.5"],
+            "MB_FALLOFF": ["1.0", "1.2"], "output_dir": ["membrane/deconv"]})
+combos, varied = d._combinations()
+check("sweep: 3 x 2 values = 6 cards", len(combos) == 6)
+check("sweep: only the multi-valued params count as varied",
+      varied == ["MB_STRENGTH", "MB_FALLOFF"])
+check("sweep: fixed params ride along unchanged",
+      all(c["input_dir"] == "recon" for c in combos))
+check("sweep: every combination is distinct",
+      len({(c["MB_STRENGTH"], c["MB_FALLOFF"]) for c in combos}) == 6)
+sfx = d._suffixed(combos)
+check("sweep: colliding output folders get _v1.._vN",
+      [c["output_dir"] for c in sfx]
+      == [f"membrane/deconv_v{i}" for i in range(1, 7)])
+check("sweep: suffixing touches nothing else",
+      all(c["MB_STRENGTH"] == o["MB_STRENGTH"] for c, o in zip(sfx, combos)))
+check("sweep: the card name says which variant it is",
+      "Strength=0.5" in d._label_for(sfx[0], varied, 1)
+      and d._label_for(sfx[0], varied, 1).startswith("Deconvolve · "))
+check("sweep: opting out leaves the output path alone",
+      _sweep({"input_dir": ["recon"], "MB_STRENGTH": ["0.5", "1.0"],
+              "MB_FALLOFF": ["1.0"], "output_dir": ["membrane/deconv"]},
+             suffix=False)._suffixed(combos)[0]["output_dir"] == "membrane/deconv")
+
+# A repeated value is a slip, not a request for the same job twice.
+d2 = _sweep({"input_dir": ["recon"], "MB_STRENGTH": ["1.0", "1.0", "1.5"],
+             "MB_FALLOFF": ["1.0"], "output_dir": ["membrane/deconv"]})
+combos2, _ = d2._combinations()
+check("sweep: duplicate values collapse", len(combos2) == 2)
+
+# Output paths that already differ must NOT be renamed under the user.
+d3 = _sweep({"input_dir": ["recon"], "MB_STRENGTH": ["0.5", "1.0"],
+             "MB_FALLOFF": ["1.0"], "output_dir": ["membrane/deconv"]})
+combos3, _ = d3._combinations()
+distinct = [dict(combos3[0], output_dir="membrane/a"),
+            dict(combos3[1], output_dir="membrane/b")]
+check("sweep: already-distinct outputs are left as they are",
+      [c["output_dir"] for c in d3._suffixed(distinct)] == ["membrane/a",
+                                                            "membrane/b"])
+
+# ---- the dialog must survive being CONSTRUCTED -----------------------------
+# Every check above builds it with __new__ and hand-set attributes, so the sweep
+# maths was covered while __init__ was not — and __init__ was broken for every
+# stage: _param_block -> _add_row -> _refresh runs once per parameter, before the
+# button row exists, so opening it raised
+#     AttributeError: 'VariantsDialog' object has no attribute 'build_btn'
+# The Qt stub cannot catch that on its own: its __getattr__ hands back a dummy
+# for ANY missing attribute. This subclass restores real Python behaviour, so an
+# attribute touched before it is assigned raises here exactly as it does in Qt.
+# Only the dialog's OWN attributes are made strict; inherited Qt methods
+# (setWindowTitle, resize, …) still come from the stub, as they would from Qt.
+_OWN_ATTRS = {"build_btn", "queue_btn", "summary", "suffix_cb", "form", "rows",
+              "spec", "variants", "labels", "queue"}
+
+
+class _StrictVariants(app.VariantsDialog):
+    def __getattr__(self, name):        # shadows the stub's permissive one
+        if name in _OWN_ATTRS:
+            raise AttributeError(
+                f"VariantsDialog touched self.{name} before __init__ assigned it")
+        inherited = getattr(super(), "__getattr__", None)
+        if inherited is None:
+            raise AttributeError(name)
+        return inherited(name)
+
+
+# Every dialog that connects a signal while building its widgets can hit this,
+# so the guard is generic: any attribute a dialog assigns in __init__ must not
+# be READ before that point. ViewerPickDialog reintroduced the exact bug this
+# was written for, because the first version of this test named one class.
+def _strict(cls, own):
+    class Strict(cls):
+        def __getattr__(self, name):
+            if name in own:
+                raise AttributeError(
+                    f"{cls.__name__} touched self.{name} before __init__ set it")
+            inherited = getattr(super(), "__getattr__", None)
+            if inherited is None:
+                raise AttributeError(name)
+            return inherited(name)
+    return Strict
+
+
+_INV = {"Position003": ["/r/Position003.mrc", "/o/Position003_segmented.mrc"],
+        "Position045": ["/r/Position045.mrc", "/o/Position045_segmented.mrc"]}
+try:
+    _S = _strict(app.ViewerPickDialog, {"tree", "count", "files"})
+    _S(None, _INV)
+    _ok, _why = True, ""
+except Exception as e:                                          # noqa: BLE001
+    _ok, _why = False, f"{type(e).__name__}: {e}"
+check(f"ViewerPickDialog constructs without touching a widget too early {_why}",
+      _ok)
+try:
+    _S2 = _strict(app.TomoPickDialog, {"list", "count", "stems", "groups"})
+    _S2(None, "/nonexistent", "")
+    _ok2, _why2 = True, ""
+except Exception as e:                                          # noqa: BLE001
+    _ok2, _why2 = False, f"{type(e).__name__}: {e}"
+check(f"TomoPickDialog too {_why2}", _ok2)
+
+
+for _sid in ("ts_reconstruct", "mb_deconv", "mb_isonet2_train", "ts_ctf"):
+    _spec = next(s for s in app.STAGES if s["id"] == _sid)
+    try:
+        _StrictVariants(None, _spec, app.stage_defaults(_spec))
+        _ok, _why = True, ""
+    except Exception as e:                                  # noqa: BLE001
+        _ok, _why = False, f"{type(e).__name__}: {e}"
+    check(f"Queue variants opens for {_sid} {_why}", _ok)
 
 # ---- a queued card with no stored command is not a dead card ----------------
 # Cards placed from the palette have params but were never queued through the
@@ -511,36 +799,48 @@ with tempfile.TemporaryDirectory() as td:
     w._param_store = {}
     w._prepare_job_inputs = lambda *a, **k: None
     w._set_status = lambda *a, **k: None
-    sel = app.new_job(root, "ts_template_match", "Subset selection",
+    # A real RELION 4 star, so the export's pre-flight can read its pixel size.
+    (root / "Select" / "job019").mkdir(parents=True)
+    (root / "Select" / "job019" / "particles.star").write_text(
+        "data_optics\nloop_\n_rlnOpticsGroup #1\n_rlnImagePixelSize #2\n1 6.28\n\n"
+        "data_particles\nloop_\n_rlnCoordinateX #1\n_rlnCoordinateY #2\n"
+        "_rlnCoordinateZ #3\n_rlnMicrographName #4\n_rlnOriginXAngst #5\n"
+        "100.0 200.0 300.0 Position003.tomostar -4.7\n")
+    sel = app.new_job(root, "relion4_result", "Subset selection",
                       {"source_star": "Select/job019/particles.star",
-                       "override_suffix": "picks_v5", "tomo_angpix": "6.28"})
+                       "job_dir": "Select/job019"})
     app.update_job(root, sel["id"], status="completed", tool="relion_selection")
-    w._build_downstream(sel["id"], "relion4_to_warp")
+    w._build_downstream(sel["id"], "ts_export_particles")
     made = [j for j in app.load_jobs(root)["jobs"].values()
-            if j["stage_id"] == "relion4_to_warp"]
-    check("downstream created one converter card", len(made) == 1)
+            if j["stage_id"] == "ts_export_particles"]
+    check("downstream created one export card", len(made) == 1)
     check("the builder is bound to that card", w.current["job_id"] == made[0]["id"])
     check("its star was derived from the selection",
-          made[0]["params"].get("particles_star") == "Select/job019/particles.star")
+          made[0]["params"].get("input_star") == "Select/job019/particles.star")
+    check("and coords_angpix was read from the star",
+          made[0]["params"].get("coords_angpix") == "6.28")
+    check("with the pick-star route blanked",
+          made[0]["params"].get("input_directory") == ""
+          and made[0]["params"].get("normalized_coords") is False)
 
     # Pressing the builder's run button must run THAT job, not build another.
-    w._values = lambda: dict(made[0]["params"], out_dir="picks_v6")
+    w._values = lambda ctx=None: dict(made[0]["params"], diameter="160")
     w._confirm_validator = lambda spec, params: True
     w._confirm_overwrite = lambda spec, params: True
     w.runner._busy = False
     w._save_and_run_job(made[0]["id"])
     after = [j for j in app.load_jobs(root)["jobs"].values()
-             if j["stage_id"] == "relion4_to_warp"]
+             if j["stage_id"] == "ts_export_particles"]
     check("running from the builder creates NO second card", len(after) == 1)
     check("it ran the bound card", after[0]["status"] == "running")
     check("the form's edits were saved into it",
-          after[0]["params"].get("out_dir") == "picks_v6")
+          after[0]["params"].get("diameter") == "160")
     check("and its command was resolved", bool(after[0].get("command")))
 
     # The binding is STICKY but re-validated, so it lapses on its own rather than
     # being eagerly cleared. Once the bound job is running it is no longer editable,
     # and the next rebuild of that stage must drop it.
-    spec_tw = next(x for x in app.STAGES if x["id"] == "relion4_to_warp")
+    spec_tw = next(x for x in app.STAGES if x["id"] == "ts_export_particles")
     w._select_stage(spec_tw)
     check("a running job's binding lapses on rebuild",
           w.current["job_id"] is None)
@@ -579,7 +879,7 @@ with tempfile.TemporaryDirectory() as td:
           w.current["job_id"] == q["id"])
 
     before = len(app.load_jobs(root)["jobs"])
-    w._values = lambda: {"project_dir": "relion4/v6", "starfile": "matching.star"}
+    w._values = lambda ctx=None: {"project_dir": "relion4/v6", "starfile": "matching.star"}
     w.current["manual"] = False
     w._save_queued_job(q["id"])
     after = app.load_jobs(root)["jobs"]
@@ -629,7 +929,20 @@ with tempfile.TemporaryDirectory() as td:
             return 1
     app.QMessageBox = Box
 
-    spec = next(x for x in app.STAGES if x["id"] == "relion4_class3d")
+    # A SYNTHETIC spec, not a real stage. The rule under test is about
+    # output_subdirs — warn about the folder a stage actually writes, not the
+    # project root that merely contains it — and it outlived the stage that
+    # first exposed it (relion4_class3d, removed 2026-08-21 as something that
+    # would never be run through tomogration). Pinning the test to a stage id
+    # made a general guarantee look like a detail of one card.
+    spec = {"id": "synthetic_relion_stage", "label": "Writes a job folder",
+            "output_params": ["project_dir"],
+            # Which param holds the CONTAINER the subdirs hang off. Without it
+            # the base never resolves, the subdir rule never engages, and the
+            # container gets named as at risk — the very false alarm this
+            # block exists to prevent.
+            "output_subdir_param": "project_dir",
+            "output_subdirs": ["Class3D/job001"], "docs": {}}
     proj = root / "relion4/picks_v5"
     (proj / "subtomo").mkdir(parents=True)
     (proj / "matching_conv.star").write_text("x")
@@ -649,8 +962,9 @@ with tempfile.TemporaryDirectory() as td:
           "Class3D/job001" in asked[0])
     check("the project root itself is not listed as at risk",
           "    relion4/picks_v5/\n" not in asked[0])
-    check("the fixed job001 name is documented as the risk",
-          "job001 is a FIXED name" in spec["docs"]["pitfall"])
+    check("a stage with no declared subdirs still warns about its output dir",
+          w._confirm_overwrite({"id": "x", "output_params": ["project_dir"],
+                                "docs": {}}, params) is not None)
 
 
 # ---- a second child must not land on top of the first -----------------------
@@ -663,15 +977,15 @@ with tempfile.TemporaryDirectory() as td:
     (root / ".tomogration_jobs.json").write_text('{"seq":0,"jobs":{}}')
     w = Win(root)
     w._param_store = {}
-    sel = app.new_job(root, "ts_template_match", "Subset selection",
+    sel = app.new_job(root, "relion4_result", "Subset selection",
                       {"source_star": "Select/job019/particles.star",
-                       "override_suffix": "picks_v5", "tomo_angpix": "6.28"})
+                       "job_dir": "Select/job019"})
     app.update_job(root, sel["id"], status="completed", tool="relion_selection")
 
-    w._build_downstream(sel["id"], "relion4_to_warp")
-    w._build_downstream(sel["id"], "relion4_to_warp")
+    w._build_downstream(sel["id"], "ts_export_particles")
+    w._build_downstream(sel["id"], "ts_export_particles")
     kids = sorted((j["id"] for j in app.load_jobs(root)["jobs"].values()
-                   if j["stage_id"] == "relion4_to_warp"), key=app._job_seq)
+                   if j["stage_id"] == "ts_export_particles"), key=app._job_seq)
     check("building downstream twice makes TWO cards", len(kids) == 2)
     pos = app.load_jobs(root)["positions"]
     a, b = pos[kids[0]], pos[kids[1]]
@@ -694,11 +1008,11 @@ with tempfile.TemporaryDirectory() as td:
           len({j["id"] for j in app.load_jobs(root)["jobs"].values()}) == 3)
 
     # A third one keeps stepping right rather than stacking.
-    w._build_downstream(sel["id"], "relion4_to_warp")
+    w._build_downstream(sel["id"], "ts_export_particles")
     pos = app.load_jobs(root)["positions"]
     xs = sorted(pos[k][0] for k in
                 sorted((j["id"] for j in app.load_jobs(root)["jobs"].values()
-                        if j["stage_id"] == "relion4_to_warp"), key=app._job_seq))
+                        if j["stage_id"] == "ts_export_particles"), key=app._job_seq))
     check("three children occupy three distinct columns", len(set(xs)) == 3)
 
 
@@ -894,11 +1208,26 @@ with tempfile.TemporaryDirectory() as td:
     check("clicking a Building card binds the builder",
           w.current["job_id"] == b["id"])
     check("and shows that card's own parameters",
-          w._param_store["ts_export_particles"]["box"] == "112")
+          (w._form_shown or {}).get("box") == "112")
+    check("without touching the per-stage param store",
+          "ts_export_particles" not in w._param_store)
+
+    # THE DETOUR: visit another stage (to review something), then come back via
+    # the stage itself (not the card). The binding must survive — this used to
+    # drop it, the button reverted to plain "▶ Run", and the next click launched
+    # an untracked trunk run instead of the card on screen.
+    _spec = lambda sid: next(s for s in app.STAGES if s["id"] == sid)
+    w._select_stage(_spec("ts_ctf"))
+    check("another stage has no binding", w.current["job_id"] is None)
+    w._select_stage(_spec("ts_export_particles"))
+    check("the binding survives a detour to another stage",
+          w.current["job_id"] == b["id"])
 
     app.update_job(root, b["id"], status="queued")
     w._canvas_pick(dict(node, status="queued"))
     check("clicking a Queued card binds too", w.current["job_id"] == b["id"])
+    check("re-clicking the bound card keeps the working form (no reload)",
+          w._form_shown is None)
 
     # A finished card must NOT bind — re-running it is its own card action, and
     # silently overwriting a completed job's parameters would be worse. But it MUST
@@ -912,9 +1241,11 @@ with tempfile.TemporaryDirectory() as td:
     w._canvas_pick(dict(node, status="completed"))
     check("clicking a Completed card does not bind", w.current["job_id"] is None)
     check("but it DOES show that job's recorded parameters",
-          w._param_store["ts_export_particles"]["box"] == "80")
-    check("today's values are replaced, not merged",
-          w._param_store["ts_export_particles"].get("output_angpix") == "6.28")
+          (w._form_shown or {}).get("box") == "80")
+    check("shown values are the job's whole set, not merged with today's",
+          (w._form_shown or {}).get("output_angpix") == "6.28")
+    check("viewing history leaves today's saved values intact",
+          w._param_store["ts_export_particles"] == {"box": "112"})
 
     # Templates and discovered cards have no job behind them at all.
     tmpl = next(n for n in nodes if n.get("is_template"))
@@ -943,7 +1274,10 @@ with tempfile.TemporaryDirectory() as td:
           w._showing_job is not None and w._showing_job["id"] == old_job["id"])
     check("the banner carries its status", w._showing_job["status"] == "completed")
     check("and when it ran", w._showing_job["when"] == "2026-07-16 09:20:00")
-    check("its params are loaded", w._param_store["ts_export_particles"]["box"] == "80")
+    check("its params are shown (one-shot overlay, not the store)",
+          (w._form_shown or {}).get("box") == "80")
+    check("the per-stage store is untouched by the view",
+          "ts_export_particles" not in w._param_store)
     check("and the buttons are NOT bound to it", w.current["job_id"] is None)
 
     # An editable job gets the binding and NO banner — it is not history.
@@ -987,11 +1321,14 @@ with tempfile.TemporaryDirectory() as td:
     w._select_stage(spec)
     check("and a second one", w.current["job_id"] == j["id"])
 
-    # Moving to a DIFFERENT stage must drop it — that form is not editing this job.
+    # A DIFFERENT stage's form is not editing this job — no binding there. But
+    # coming BACK must restore it: a detour to review another card used to lose
+    # the binding for good, the button reverted to plain "▶ Run", and the next
+    # click ran an untracked trunk run instead of the card on screen.
     w._select_stage(next(x for x in app.STAGES if x["id"] == "ts_ctf"))
-    check("switching stage drops the binding", w.current["job_id"] is None)
+    check("switching stage shows no binding there", w.current["job_id"] is None)
     w._select_stage(spec)
-    check("and it does not come back", w.current["job_id"] is None)
+    check("and coming back restores it", w.current["job_id"] == j["id"])
 
     # A job that starts running is no longer editable, so the binding must lapse
     # rather than let the form write into a live run.
@@ -1003,12 +1340,105 @@ with tempfile.TemporaryDirectory() as td:
           w.current["job_id"] is None)
 
     # And the click-time path refuses too, even if a stale id reached it.
-    w._values = lambda: {"box": "999"}
+    w._values = lambda ctx=None: {"box": "999"}
     w._confirm_validator = lambda sp, pa: True
     w._confirm_overwrite = lambda sp, pa: True
     w._save_and_run_job(j["id"])
     check("saving into a running job is refused",
           app.load_jobs(root)["jobs"][j["id"]]["params"]["box"] == "48")
+
+
+# ---- Found-on-disk ▸ RELION Subset selection ▸ re-extract (canvas view) -----
+# The drawer's re-extract action used to prefill a converter builder — a column
+# that no longer exists in canvas view — and the converter itself is retired.
+# Canvas mode now promotes the selection to a card and builds the EXPORT card
+# downstream of it: star prefilled, coords_angpix read from the star, pop-out
+# builder open. Lists view prefills the export form the same way.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    star_rel = "relion4/Select/job009/particles.star"
+    star_abs = root / star_rel
+    star_abs.parent.mkdir(parents=True)
+    star_abs.write_text(
+        "data_optics\nloop_\n_rlnOpticsGroup #1\n_rlnImagePixelSize #2\n1 6.28\n\n"
+        "data_particles\nloop_\n_rlnCoordinateX #1\n_rlnMicrographName #2\n"
+        "1.0 Position003.tomostar\n2.0 Position003.tomostar\n"
+        "3.0 Position004.tomostar\n")
+    w = Win(root)
+    w._param_store = {}
+    w._view_mode = "canvas"
+    w._orphan_cache = None
+    w._last_orphan_keys = None
+    pops = []
+    w._open_job_popout = lambda target, tab=None: pops.append((target, tab))
+    w._open_job_in_builder = lambda jid, sid: pops.append((jid, "builder"))
+    orph = {"kind": "relion_job", "suffix": "Select/job009", "star": star_rel,
+            "dir": "relion4/Select/job009"}
+    w._open_relion_export(orph)
+    jobs = app.load_jobs(root).get("jobs") or {}
+    sels = [(jid, j) for jid, j in jobs.items()
+            if j.get("tool") == "relion_selection"]
+    exps = [(jid, j) for jid, j in jobs.items()
+            if j.get("stage_id") == "ts_export_particles"]
+    check("drawer re-extract (canvas): the selection becomes a card",
+          len(sels) == 1)
+    check("…as a completed relion4_result node",
+          bool(sels) and sels[0][1].get("stage_id") == "relion4_result"
+          and sels[0][1].get("status") == "completed")
+    check("…with its particle count read once at creation",
+          bool(sels) and str(sels[0][1].get("params", {}).get("n_particles")) == "3")
+    check("drawer re-extract (canvas): an EXPORT card is created, no converter",
+          len(exps) == 1 and not any(j.get("stage_id") == "relion4_to_warp"
+                                     for j in jobs.values()))
+    exp = exps[0][1] if exps else {}
+    check("…wired to the selection card",
+          bool(exps) and bool(sels)
+          and exp.get("inputs", {}).get("processing") == sels[0][0])
+    check("…reading the RELION star directly",
+          exp.get("params", {}).get("input_star") == star_rel)
+    check("…with coords_angpix taken from the star's optics block",
+          exp.get("params", {}).get("coords_angpix") == "6.28")
+    check("…and '0-1 fractions' off",
+          exp.get("params", {}).get("normalized_coords") is False)
+    check("…and its builder was opened",
+          any(t == "builder" for _tg, t in pops))
+    # Re-running the same drawer action must not mint a second selection card.
+    w._open_relion_export(orph)
+    jobs2 = app.load_jobs(root).get("jobs") or {}
+    check("re-opening reuses the selection card",
+          sum(1 for j in jobs2.values()
+              if j.get("tool") == "relion_selection") == 1)
+
+    # Lists view keeps the classic behaviour: prefill + select the stage form.
+    w2 = Win(root)
+    w2._param_store = {}
+    w2._view_mode = "lists"
+    w2._open_relion_export(orph)
+    check("drawer re-extract (lists): opens the export form",
+          getattr(w2, "_selected", "") == "ts_export_particles")
+    check("…with the star and its pixel size prefilled",
+          w2._param_store.get("ts_export_particles", {}).get("input_star") == star_rel
+          and w2._param_store.get("ts_export_particles", {}).get("coords_angpix")
+          == "6.28")
+
+    # The pre-flight refuses a coords_angpix that is not the star's own.
+    blocked = []
+    w2._log = lambda msg, kind="info": blocked.append((kind, msg))
+    ok = w2._check_direct_export({"input_star": star_rel, "coords_angpix": "12.56"},
+                                 interactive=False)
+    check("a wrong coords_angpix is refused before Warp runs", ok is False
+          and any("coords_angpix is 12.56" in m for _k, m in blocked))
+    check("the star's own pixel size passes",
+          w2._check_direct_export({"input_star": star_rel, "coords_angpix": "6.28"},
+                                  interactive=False) is True)
+    check("a missing star is refused",
+          w2._check_direct_export({"input_star": "nope/particles.star",
+                                   "coords_angpix": "6.28"}, interactive=False)
+          is False)
+    check("the pick-star route is not touched by the check",
+          w2._check_direct_export({"input_directory": "warp_tiltseries/matching",
+                                   "coords_angpix": "12.56"}, interactive=False)
+          is True)
 
 
 print(f"\n{passed} passed, {failed} failed")
