@@ -219,7 +219,7 @@ install.sh                    Builds the venv, fetches Qt libs, registers the la
 fetch_xcb_libs.sh             Fetches libxcb-cursor0 without sudo when the wheel lacks it.
 Tomogration-icon.png          Launcher icon.
 tomogration_brief.md          Design brief / internal reference for the pipeline.
-LICENSE                       MIT (this wrapper). External tools keep their own licenses.
+LICENSE                       Apache-2.0 (this wrapper). External tools keep their own licenses.
 CONTRIBUTING.md               How to contribute + how to test without a GPU/display.
 
 Companion scripts the app shells out to (keep them beside tomogration_app.py —
@@ -307,7 +307,7 @@ commit microscopy data.
 
 ## License
 
-[MIT](LICENSE) © 2026 Miron Leanca and The Rosalind Franklin Institute. Tomogration orchestrates
+[Apache-2.0](LICENSE) © 2026 Miron Leanca and The Rosalind Franklin Institute. Tomogration orchestrates
 external tools (WarpTools, AreTomo2, IMOD, miss-alignment, RELION/M) that carry
 their own licenses — see the note at the bottom of `LICENSE`.
 

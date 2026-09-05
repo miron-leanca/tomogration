@@ -1,0 +1,9 @@
+Tomogration
+Copyright 2026 Miron Leanca and The Rosalind Franklin Institute
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Tomogration orchestrates external tools it does not include or
+redistribute -- WarpTools, AreTomo2, IMOD, RELION, M, MemBrain-seg,
+IsoNet, crYOLO, miss-alignment, napari and surforama. Each keeps its own
+licence and citation requirements; install and cite them separately.
